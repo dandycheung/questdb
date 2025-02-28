@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -38,7 +38,7 @@ public class Table2Ilp {
      *                             [-sts <timestamp_column>] [-sym <symbol_columns>] [-dauth <ilp_auth_key:ilp_auth_token>] [-dtls]
      */
     public static void main(String[] args) {
-        LogFactory.configureSync();
+        LogFactory.enableGuaranteedLogging();
 
         Table2IlpParams params = Table2IlpParams.parse(args);
         if (!params.isValid()) {

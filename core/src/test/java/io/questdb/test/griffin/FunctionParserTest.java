@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,32 +24,81 @@
 
 package io.questdb.test.griffin;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.GenericRecordMetadata;
+import io.questdb.cairo.GeoHashes;
+import io.questdb.cairo.TableColumnMetadata;
 import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.SymbolTable;
 import io.questdb.cairo.sql.SymbolTableSource;
-import io.questdb.griffin.*;
-import io.questdb.griffin.engine.functions.*;
+import io.questdb.griffin.FunctionFactory;
+import io.questdb.griffin.FunctionFactoryCache;
+import io.questdb.griffin.FunctionParser;
+import io.questdb.griffin.SqlException;
+import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.griffin.engine.functions.BinFunction;
+import io.questdb.griffin.engine.functions.BooleanFunction;
+import io.questdb.griffin.engine.functions.ByteFunction;
+import io.questdb.griffin.engine.functions.DateFunction;
+import io.questdb.griffin.engine.functions.DoubleFunction;
+import io.questdb.griffin.engine.functions.FloatFunction;
+import io.questdb.griffin.engine.functions.IntFunction;
+import io.questdb.griffin.engine.functions.LongFunction;
+import io.questdb.griffin.engine.functions.ShortFunction;
+import io.questdb.griffin.engine.functions.StrFunction;
+import io.questdb.griffin.engine.functions.TimestampFunction;
 import io.questdb.griffin.engine.functions.bool.InStrFunctionFactory;
 import io.questdb.griffin.engine.functions.bool.NotFunctionFactory;
 import io.questdb.griffin.engine.functions.bool.OrFunctionFactory;
 import io.questdb.griffin.engine.functions.cast.CastStrToGeoHashFunctionFactory;
 import io.questdb.griffin.engine.functions.catalogue.CursorDereferenceFunctionFactory;
 import io.questdb.griffin.engine.functions.conditional.SwitchFunctionFactory;
-import io.questdb.griffin.engine.functions.constants.*;
+import io.questdb.griffin.engine.functions.constants.BooleanConstant;
+import io.questdb.griffin.engine.functions.constants.ByteConstant;
+import io.questdb.griffin.engine.functions.constants.Constants;
+import io.questdb.griffin.engine.functions.constants.DateConstant;
+import io.questdb.griffin.engine.functions.constants.DoubleConstant;
+import io.questdb.griffin.engine.functions.constants.FloatConstant;
+import io.questdb.griffin.engine.functions.constants.GeoIntConstant;
+import io.questdb.griffin.engine.functions.constants.IntConstant;
+import io.questdb.griffin.engine.functions.constants.Long256Constant;
+import io.questdb.griffin.engine.functions.constants.LongConstant;
+import io.questdb.griffin.engine.functions.constants.NullConstant;
+import io.questdb.griffin.engine.functions.constants.ShortConstant;
+import io.questdb.griffin.engine.functions.constants.StrConstant;
+import io.questdb.griffin.engine.functions.constants.SymbolConstant;
+import io.questdb.griffin.engine.functions.constants.TimestampConstant;
 import io.questdb.griffin.engine.functions.date.SysdateFunctionFactory;
 import io.questdb.griffin.engine.functions.date.ToStrDateFunctionFactory;
 import io.questdb.griffin.engine.functions.date.ToStrTimestampFunctionFactory;
+import io.questdb.griffin.engine.functions.eq.EqDateFunctionFactory;
 import io.questdb.griffin.engine.functions.eq.EqDoubleFunctionFactory;
 import io.questdb.griffin.engine.functions.eq.EqIntFunctionFactory;
 import io.questdb.griffin.engine.functions.eq.EqLongFunctionFactory;
-import io.questdb.griffin.engine.functions.groupby.*;
-import io.questdb.griffin.engine.functions.math.*;
+import io.questdb.griffin.engine.functions.groupby.CountDistinctLong256GroupByFunctionFactory;
+import io.questdb.griffin.engine.functions.groupby.CountGroupByFunctionFactory;
+import io.questdb.griffin.engine.functions.groupby.CountLongConstGroupByFunction;
+import io.questdb.griffin.engine.functions.groupby.MinDateGroupByFunctionFactory;
+import io.questdb.griffin.engine.functions.groupby.MinFloatGroupByFunctionFactory;
+import io.questdb.griffin.engine.functions.groupby.MinTimestampGroupByFunctionFactory;
+import io.questdb.griffin.engine.functions.math.AbsShortFunctionFactory;
+import io.questdb.griffin.engine.functions.math.AddDoubleFunctionFactory;
+import io.questdb.griffin.engine.functions.math.AddFloatFunctionFactory;
+import io.questdb.griffin.engine.functions.math.AddIntFunctionFactory;
+import io.questdb.griffin.engine.functions.math.AddLongFunctionFactory;
+import io.questdb.griffin.engine.functions.math.NegShortFunctionFactory;
+import io.questdb.griffin.engine.functions.math.SubIntFunctionFactory;
 import io.questdb.griffin.engine.functions.str.LengthStrFunctionFactory;
 import io.questdb.griffin.engine.functions.str.LengthSymbolFunctionFactory;
 import io.questdb.griffin.engine.functions.str.ToCharBinFunctionFactory;
-import io.questdb.std.*;
+import io.questdb.std.BinarySequence;
+import io.questdb.std.IntList;
+import io.questdb.std.Long256Impl;
+import io.questdb.std.Numbers;
+import io.questdb.std.NumericException;
+import io.questdb.std.ObjList;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
 import io.questdb.std.datetime.millitime.MillisecondClock;
 import io.questdb.test.cairo.DefaultTestCairoConfiguration;
@@ -57,15 +106,16 @@ import io.questdb.test.cairo.TestRecord;
 import io.questdb.test.tools.TestUtils;
 import org.jetbrains.annotations.NotNull;
 import org.junit.Assert;
+import org.junit.Assume;
 import org.junit.Test;
 
-import static io.questdb.cairo.ColumnType.NO_OVERLOAD;
+import static io.questdb.cairo.ColumnType.OVERLOAD_NONE;
 
 public class FunctionParserTest extends BaseFunctionFactoryTest {
 
     @Test
     public void overloadFromCharToDoubleDoesNotExist() {
-        Assert.assertEquals(ColumnType.overloadDistance(ColumnType.CHAR, ColumnType.DOUBLE), NO_OVERLOAD);
+        Assert.assertEquals(ColumnType.overloadDistance(ColumnType.CHAR, ColumnType.DOUBLE), OVERLOAD_NONE);
     }
 
     @Test
@@ -77,14 +127,17 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
     @Test
     public void overloadToUndefinedDoesNotExist() {
         boolean assertsEnabled = false;
+        //noinspection AssertWithSideEffects
         assert assertsEnabled = true;
-        if (assertsEnabled) {
-            try {
-                ColumnType.overloadDistance(ColumnType.INT, ColumnType.UNDEFINED);
-                Assert.fail();
-            } catch (AssertionError e) {
-                TestUtils.assertContains(e.getMessage(), "Undefined not supported in overloads");
-            }
+
+        // test asserts the assert in the production code
+        Assume.assumeTrue(assertsEnabled);
+
+        try {
+            ColumnType.overloadDistance(ColumnType.INT, ColumnType.UNDEFINED);
+            Assert.fail();
+        } catch (AssertionError e) {
+            TestUtils.assertContains(e.getMessage(), "Undefined not supported in overloads");
         }
     }
 
@@ -105,7 +158,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
 
@@ -127,7 +180,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -329,6 +382,32 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
     }
 
     @Test
+    public void testConstStrToDateCast() throws SqlException {
+        functions.add(new EqDateFunctionFactory());
+        final GenericRecordMetadata metadata = new GenericRecordMetadata();
+        metadata.add(new TableColumnMetadata("a", ColumnType.DATE));
+
+        FunctionParser parser = createFunctionParser();
+        Function function = parseFunction("a='2020-01-01'", metadata, parser);
+        Assert.assertEquals(ColumnType.BOOLEAN, function.getType());
+        Assert.assertTrue(function.getBool(new Record() {
+            @Override
+            public long getDate(int col) {
+                return 1577836800000L;
+            }
+        }));
+
+        function = parseFunction("'2020-01-01'=a", metadata, parser);
+        Assert.assertEquals(ColumnType.BOOLEAN, function.getType());
+        Assert.assertTrue(function.getBool(new Record() {
+            @Override
+            public long getDate(int col) {
+                return 1577836800000L;
+            }
+        }));
+    }
+
+    @Test
     public void testConstVarArgFunction() throws SqlException {
         functions.add(new InStrFunctionFactory());
         final GenericRecordMetadata metadata = new GenericRecordMetadata();
@@ -338,7 +417,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
         Assert.assertEquals(ColumnType.BOOLEAN, function.getType());
         Assert.assertTrue(function.getBool(new Record() {
             @Override
-            public CharSequence getStr(int col) {
+            public CharSequence getStrA(int col) {
                 return "yk";
             }
         }));
@@ -403,7 +482,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
     @Test
     public void testExplicitConstantLong256() throws SqlException {
         CharSequence tok = "0x7ee65ec7b6e3bc3a422a8855e9d7bfd29199af5c2aa91ba39c022fa261bdede7";
-        testConstantPassThru(new Long256Constant(Numbers.parseLong256(tok, tok.length(), new Long256Impl())));
+        testConstantPassThru(new Long256Constant(Numbers.parseLong256(tok, new Long256Impl())));
     }
 
     @Test
@@ -516,11 +595,11 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
 
         Function function = parseFunction("to_str(a, 'EE, dd-MMM-yyyy hh:mm:ss')", metadata, functionParser);
         Assert.assertEquals(ColumnType.STRING, function.getType());
-        TestUtils.assertEquals("Thursday, 03-Apr-150577 03:54:03", function.getStr(record));
+        TestUtils.assertEquals("Thursday, 03-Apr-150577 02:54:03", function.getStrA(record));
 
         Function function2 = parseFunction("to_str(b, 'EE, dd-MMM-yyyy hh:mm:ss')", metadata, functionParser);
         Assert.assertEquals(ColumnType.STRING, function2.getType());
-        TestUtils.assertEquals("Tuesday, 21-Nov-2119 08:50:58", function2.getStr(record));
+        TestUtils.assertEquals("Tuesday, 21-Nov-2119 07:50:58", function2.getStrA(record));
 
         Function function3 = parseFunction("to_char(c)", metadata, functionParser);
 
@@ -589,7 +668,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                 "000003e0 12 61 3a 9a ad 98 2e 75 52 ad 62 87 88 45 b9 9d\n" +
                 "000003f0 20 13 51 c0 e0 b7 a4 24 40 4d 50 b1 8c 4d 66 e8";
 
-        TestUtils.assertEquals(expectedBin, function3.getStr(record));
+        TestUtils.assertEquals(expectedBin, function3.getStrA(record));
     }
 
     @Test
@@ -636,7 +715,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
             }
 
             @Override
-            public boolean isReadThreadSafe() {
+            public boolean isThreadSafe() {
                 return true;
             }
         };
@@ -679,7 +758,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -712,7 +791,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -745,7 +824,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -778,7 +857,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -811,7 +890,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -844,7 +923,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -877,7 +956,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -900,7 +979,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
             public Function newInstance(int position, ObjList<Function> args, IntList argPositions, CairoConfiguration configuration1, SqlExecutionContext sqlExecutionContext) {
                 return new StrFunction() {
                     @Override
-                    public CharSequence getStr(Record rec) {
+                    public CharSequence getStrA(Record rec) {
                         return null;
                     }
 
@@ -961,7 +1040,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -986,7 +1065,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     private final String x = "abc";
 
                     @Override
-                    public CharSequence getStr(Record rec) {
+                    public CharSequence getStrA(Record rec) {
                         return x;
                     }
 
@@ -1047,7 +1126,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                     }
 
                     @Override
-                    public boolean isReadThreadSafe() {
+                    public boolean isThreadSafe() {
                         return true;
                     }
                 };
@@ -1111,7 +1190,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
         FunctionParser functionParser = new FunctionParser(
                 new DefaultTestCairoConfiguration(root) {
                     @Override
-                    public MillisecondClock getMillisecondClock() {
+                    public @NotNull MillisecondClock getMillisecondClock() {
                         return () -> {
                             try {
                                 return DateFormatUtils.parseUTCDate("2018-03-04T21:40:00.000Z");
@@ -1128,7 +1207,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                 new GenericRecordMetadata(),
                 functionParser
         );
-        TestUtils.assertEquals("Sunday, 04-Mar-2018 21:40:00", function.getStr(null));
+        TestUtils.assertEquals("Sunday, 04-Mar-2018 21:40:00", function.getStrA(null));
     }
 
     @Test
@@ -1143,15 +1222,19 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
         functions.add(new SysdateFunctionFactory());
         final GenericRecordMetadata metadata = new GenericRecordMetadata();
         metadata.add(new TableColumnMetadata("a", ColumnType.BOOLEAN));
-        assertFail(7, "unexpected argument", "a or   sysdate(a)", metadata);
+        assertFail(7, "wrong number of arguments for function `sysdate`; expected: 0, provided: 1", "a or   sysdate(a)", metadata);
     }
 
     @Test
     public void testOverloadBetweenNullAndAnyType() {
-        for (short type = ColumnType.BOOLEAN; type < ColumnType.MAX; type++) {
+        for (short type = ColumnType.BOOLEAN; type < ColumnType.NULL; type++) {
             String msg = "type: " + ColumnType.nameOf(type) + "(" + type + ")";
-            Assert.assertEquals(msg, 0, ColumnType.overloadDistance(ColumnType.NULL, type));
-            Assert.assertEquals(msg, NO_OVERLOAD, ColumnType.overloadDistance(type, ColumnType.NULL));
+            if (type == ColumnType.STRING || type == ColumnType.SYMBOL) {
+                Assert.assertEquals(msg, -1, ColumnType.overloadDistance(ColumnType.NULL, type));
+            } else {
+                Assert.assertEquals(msg, 0, ColumnType.overloadDistance(ColumnType.NULL, type));
+            }
+            Assert.assertEquals(msg, OVERLOAD_NONE, ColumnType.overloadDistance(type, ColumnType.NULL));
         }
     }
 
@@ -1184,7 +1267,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
             Assert.fail();
         } catch (SqlException e) {
             Assert.assertEquals(0, e.getPosition());
-            TestUtils.assertContains(e.getFlyweightMessage(), "unexpected argument");
+            TestUtils.assertContains(e.getFlyweightMessage(), "bad function factory (NULL), check log");
         }
     }
 
@@ -1208,9 +1291,8 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
             parseFunction("x(a)", metadata, createFunctionParser());
             Assert.fail();
         } catch (SqlException e) {
-            Assert.assertEquals(0, e.getPosition());
-            TestUtils.assertContains(e.getFlyweightMessage(), "unexpected argument");
-            TestUtils.assertContains(e.getFlyweightMessage(), "constant");
+            Assert.assertEquals(2, e.getPosition());
+            TestUtils.assertContains(e.getFlyweightMessage(), "argument type mismatch for function `x` at #1 expected: INT constant, actual: INT");
         }
     }
 
@@ -1292,17 +1374,17 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
             }
 
             @Override
-            public CharSequence getStr(int col) {
+            public CharSequence getStrA(int col) {
                 return "ABC";
             }
 
             @Override
             public int getStrLen(int col) {
-                return getStr(col).length();
+                return getStrA(col).length();
             }
 
             @Override
-            public CharSequence getSym(int col) {
+            public CharSequence getSymA(int col) {
                 return symbolValue;
             }
         };
@@ -1429,6 +1511,14 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
                 "io.questdb.griffin.engine.functions.groupby.CountDistinctLong256GroupByFunction",
                 ColumnType.LONG256
         );
+
+        assertBindVariableTypes(
+                "count(distinct $1)",
+                new CountDistinctLong256GroupByFunctionFactory(),
+                "io.questdb.griffin.engine.functions.groupby.CountDistinctLong256GroupByFunction",
+                ColumnType.LONG256
+        );
+
     }
 
     @Test
@@ -1446,7 +1536,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
         assertBindVariableTypes(
                 "length($1)",
                 new LengthStrFunctionFactory(),
-                "io.questdb.griffin.engine.functions.str.LengthStrFunctionFactory.LengthStrVFunc",
+                "io.questdb.griffin.engine.functions.str.LengthStrFunctionFactory.Func",
                 ColumnType.STRING
         );
     }
@@ -1472,17 +1562,17 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
     }
 
     @Test
-    public void testUndefinedBindVariableDefineVarArg() throws SqlException {
-        // bind variable is sparse
-        assertBindVariableTypes(
-                "case $1 when 'A' then $3 else $4 end",
-                new SwitchFunctionFactory(),
-                "io.questdb.griffin.engine.functions.conditional.StrCaseFunction",
-                ColumnType.STRING,
-                -1, // not defined
-                ColumnType.STRING,
-                ColumnType.STRING
-        );
+    public void testUndefinedBindVariableDefineVarArg() {
+        // not defined
+        bindVariableService.clear();
+        functions.add(new SwitchFunctionFactory());
+        try {
+            parseFunction("case $1 when 'A' then $3 else $4 end", null, createFunctionParser());
+            Assert.fail();
+        } catch (SqlException e) {
+            Assert.assertEquals(5, e.getPosition());
+            TestUtils.assertContains("bind variable is not supported here, please use column instead", e.getFlyweightMessage());
+        }
     }
 
     @Test
@@ -1523,7 +1613,7 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
         FunctionParser functionParser = createFunctionParser();
         Record record = new Record() {
             @Override
-            public CharSequence getStr(int col) {
+            public CharSequence getStrA(int col) {
                 return "YZ";
             }
         };
@@ -1534,23 +1624,20 @@ public class FunctionParserTest extends BaseFunctionFactoryTest {
     }
 
     @Test
-    public void testVarArgFunctionNoArg() throws SqlException {
+    public void testVarArgFunctionNoArg() {
         functions.add(new InStrFunctionFactory());
 
         final GenericRecordMetadata metadata = new GenericRecordMetadata();
         metadata.add(new TableColumnMetadata("a", ColumnType.STRING));
 
         FunctionParser functionParser = createFunctionParser();
-        Record record = new Record() {
-            @Override
-            public CharSequence getStr(int col) {
-                return "Y";
-            }
-        };
 
-        Function function = parseFunction("a in ()", metadata, functionParser);
-        Assert.assertEquals(ColumnType.BOOLEAN, function.getType());
-        Assert.assertFalse(function.getBool(record));
+        try {
+            parseFunction("a in ()", metadata, functionParser);
+            Assert.fail();
+        } catch (SqlException e) {
+            Assert.assertEquals("[2] too few arguments for 'in'", e.getMessage());
+        }
     }
 
     private void assertBindVariableTypes(

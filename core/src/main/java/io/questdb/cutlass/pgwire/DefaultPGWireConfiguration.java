@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,33 +24,27 @@
 
 package io.questdb.cutlass.pgwire;
 
+import io.questdb.DefaultFactoryProvider;
+import io.questdb.FactoryProvider;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreakerConfiguration;
 import io.questdb.griffin.DefaultSqlExecutionCircuitBreakerConfiguration;
 import io.questdb.network.DefaultIODispatcherConfiguration;
-import io.questdb.network.IODispatcherConfiguration;
-import io.questdb.network.NetworkFacade;
-import io.questdb.network.NetworkFacadeImpl;
+import io.questdb.std.ConcurrentCacheConfiguration;
+import io.questdb.std.DefaultConcurrentCacheConfiguration;
 import io.questdb.std.datetime.DateLocale;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
 
-public class DefaultPGWireConfiguration implements PGWireConfiguration {
-
+public class DefaultPGWireConfiguration extends DefaultIODispatcherConfiguration implements PGWireConfiguration {
     private final SqlExecutionCircuitBreakerConfiguration circuitBreakerConfiguration = new DefaultSqlExecutionCircuitBreakerConfiguration();
-    private final IODispatcherConfiguration ioDispatcherConfiguration = new DefaultIODispatcherConfiguration() {
-        @Override
-        public int getBindPort() {
-            return 8812;
-        }
-
-        @Override
-        public String getDispatcherLogName() {
-            return "pg-server";
-        }
-    };
 
     @Override
     public int getBinParamCountCapacity() {
         return 4;
+    }
+
+    @Override
+    public int getBindPort() {
+        return 8812;
     }
 
     @Override
@@ -69,13 +63,18 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
+    public ConcurrentCacheConfiguration getConcurrentCacheConfiguration() {
+        return DefaultConcurrentCacheConfiguration.DEFAULT;
+    }
+
+    @Override
     public int getConnectionPoolInitialCapacity() {
         return 4;
     }
 
     @Override
     public DateLocale getDefaultDateLocale() {
-        return DateFormatUtils.enLocale;
+        return DateFormatUtils.EN_LOCALE;
     }
 
     @Override
@@ -89,8 +88,23 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
-    public IODispatcherConfiguration getDispatcherConfiguration() {
-        return ioDispatcherConfiguration;
+    public String getDispatcherLogName() {
+        return "pg-server";
+    }
+
+    @Override
+    public FactoryProvider getFactoryProvider() {
+        return DefaultFactoryProvider.INSTANCE;
+    }
+
+    @Override
+    public int getForceRecvFragmentationChunkSize() {
+        return Integer.MAX_VALUE;
+    }
+
+    @Override
+    public int getForceSendFragmentationChunkSize() {
+        return Integer.MAX_VALUE;
     }
 
     @Override
@@ -101,11 +115,6 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     @Override
     public int getInsertCacheRowCount() {
         return 4;
-    }
-
-    @Override
-    public int getInsertPoolCapacity() {
-        return 16;
     }
 
     @Override
@@ -120,13 +129,13 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     }
 
     @Override
-    public int getNamesStatementPoolCapacity() {
-        return 32;
+    public int getNamedStatementLimit() {
+        return 10_000;
     }
 
     @Override
-    public NetworkFacade getNetworkFacade() {
-        return NetworkFacadeImpl.INSTANCE;
+    public int getNamesStatementPoolCapacity() {
+        return 32;
     }
 
     @Override
@@ -152,16 +161,6 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     @Override
     public int getRecvBufferSize() {
         return 1024 * 1024;
-    }
-
-    @Override
-    public int getSelectCacheBlockCount() {
-        return 8;
-    }
-
-    @Override
-    public int getSelectCacheRowCount() {
-        return 8;
     }
 
     @Override
@@ -192,6 +191,11 @@ public class DefaultPGWireConfiguration implements PGWireConfiguration {
     @Override
     public boolean isInsertCacheEnabled() {
         return true;
+    }
+
+    @Override
+    public boolean isLegacyModeEnabled() {
+        return false;
     }
 
     @Override

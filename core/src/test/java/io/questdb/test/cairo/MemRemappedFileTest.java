@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,26 +29,24 @@ import io.questdb.cairo.vm.MemoryCMRImpl;
 import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMA;
 import io.questdb.cairo.vm.api.MemoryMR;
-import io.questdb.log.Log;
-import io.questdb.log.LogFactory;
 import io.questdb.std.FilesFacade;
 import io.questdb.std.MemoryTag;
 import io.questdb.std.Rnd;
-import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.std.str.Path;
-import org.junit.*;
-import org.junit.rules.TemporaryFolder;
+import io.questdb.test.AbstractTest;
+import io.questdb.test.std.TestFilesFacadeImpl;
+import org.junit.AfterClass;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 import java.io.IOException;
 
-public class MemRemappedFileTest {
-    private static final Log LOG = LogFactory.getLog(MemRemappedFileTest.class);
+public class MemRemappedFileTest extends AbstractTest {
     private static final int NCYCLES = 4;
     private static final int NPAGES = 1000;
     private static final FilesFacade ff = TestFilesFacadeImpl.INSTANCE;
     private static final long MAPPING_PAGE_SIZE = ff.getPageSize();
-    @ClassRule
-    public static TemporaryFolder temp = new TemporaryFolder();
     private static int nFile = 0;
     private static CharSequence root;
     private final Path path = new Path(1_000_000);
@@ -80,7 +78,7 @@ public class MemRemappedFileTest {
 
     private double test(MemoryMR readMem) {
         long nanos = 0;
-        try (MemoryMA appMem = Vm.getMAInstance()) {
+        try (MemoryMA appMem = Vm.getPMARInstance(null)) {
             for (int cycle = 0; cycle < NCYCLES; cycle++) {
                 path.trimTo(0).concat(root).concat("file" + nFile).$();
                 nFile++;
@@ -92,7 +90,7 @@ public class MemRemappedFileTest {
                 long offset = 0;
                 for (int nPage = 0; nPage < NPAGES; nPage++) {
                     long newSize = MAPPING_PAGE_SIZE * (nPage + 1);
-                    appMem.of(ff, path, newSize, MemoryTag.MMAP_DEFAULT, CairoConfiguration.O_NONE);
+                    appMem.of(ff, path.$(), newSize, MemoryTag.MMAP_DEFAULT, CairoConfiguration.O_NONE);
                     appMem.skip(newSize - MAPPING_PAGE_SIZE);
                     for (int i = 0; i < MAPPING_PAGE_SIZE; i++) {
                         byte b = (byte) rnd.nextInt();
@@ -100,7 +98,7 @@ public class MemRemappedFileTest {
                         expectedTotal += b;
                     }
                     if (nPage == 0) {
-                        readMem.smallFile(ff, path, MemoryTag.MMAP_DEFAULT);
+                        readMem.smallFile(ff, path.$(), MemoryTag.MMAP_DEFAULT);
                     } else {
                         readMem.extend(newSize);
                     }
@@ -112,8 +110,9 @@ public class MemRemappedFileTest {
 
                 nanos = System.nanoTime() - nanos;
                 Assert.assertEquals(expectedTotal, actualTotal);
-
-                ff.remove(path);
+                appMem.close();
+                readMem.close();
+                ff.remove(path.$());
             }
             readMem.close();
             return nanos / 1000000.0;

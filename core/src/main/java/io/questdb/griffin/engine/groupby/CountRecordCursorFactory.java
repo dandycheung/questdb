@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -52,8 +52,14 @@ public class CountRecordCursorFactory extends AbstractRecordCursorFactory {
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        cursor.of(base.getCursor(executionContext));
-        return cursor;
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            cursor.of(baseCursor, executionContext.getCircuitBreaker());
+            return cursor;
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
+        }
     }
 
     @Override
@@ -73,15 +79,30 @@ public class CountRecordCursorFactory extends AbstractRecordCursorFactory {
     }
 
     @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    @Override
     protected void _close() {
         base.close();
     }
 
     private static class CountRecordCursor implements NoRandomAccessRecordCursor {
         private final CountRecord countRecord = new CountRecord();
+        private final RecordCursor.Counter counter = new Counter();
         private RecordCursor baseCursor;
+        private SqlExecutionCircuitBreaker circuitBreaker;
         private long count;
         private boolean hasNext = true;
+
+        @Override
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            if (hasNext) {
+                counter.add(1);
+                hasNext = false;
+            }
+        }
 
         @Override
         public void close() {
@@ -95,13 +116,14 @@ public class CountRecordCursorFactory extends AbstractRecordCursorFactory {
 
         @Override
         public boolean hasNext() {
-            if (baseCursor != null) {
-                while (baseCursor.hasNext()) {
-                    count++;
-                }
-                baseCursor = Misc.free(baseCursor);
-            }
             if (hasNext) {
+                long size = baseCursor.size();
+                if (size > -1) {
+                    count = size;
+                } else {
+                    baseCursor.calculateSize(circuitBreaker, counter);
+                    count = counter.get();
+                }
                 hasNext = false;
                 return true;
             }
@@ -115,18 +137,15 @@ public class CountRecordCursorFactory extends AbstractRecordCursorFactory {
 
         @Override
         public void toTop() {
+            baseCursor.toTop();
             hasNext = true;
+            count = 0;
+            counter.clear();
         }
 
-        private void of(RecordCursor baseCursor) {
+        private void of(RecordCursor baseCursor, SqlExecutionCircuitBreaker circuitBreaker) {
             this.baseCursor = baseCursor;
-            final long size = baseCursor.size();
-            if (size < 0) {
-                count = 0;
-            } else {
-                count = size;
-                this.baseCursor = Misc.free(baseCursor);
-            }
+            this.circuitBreaker = circuitBreaker;
             toTop();
         }
 

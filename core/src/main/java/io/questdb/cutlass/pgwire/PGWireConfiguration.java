@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,14 +24,15 @@
 
 package io.questdb.cutlass.pgwire;
 
+import io.questdb.FactoryProvider;
 import io.questdb.cairo.sql.SqlExecutionCircuitBreakerConfiguration;
 import io.questdb.mp.WorkerPoolConfiguration;
 import io.questdb.network.IODispatcherConfiguration;
-import io.questdb.network.NetworkFacade;
+import io.questdb.std.ConcurrentCacheConfiguration;
 import io.questdb.std.Rnd;
 import io.questdb.std.datetime.DateLocale;
 
-public interface PGWireConfiguration extends WorkerPoolConfiguration {
+public interface PGWireConfiguration extends IODispatcherConfiguration, WorkerPoolConfiguration {
 
     int getBinParamCountCapacity();
 
@@ -41,6 +42,8 @@ public interface PGWireConfiguration extends WorkerPoolConfiguration {
 
     SqlExecutionCircuitBreakerConfiguration getCircuitBreakerConfiguration();
 
+    ConcurrentCacheConfiguration getConcurrentCacheConfiguration();
+
     int getConnectionPoolInitialCapacity();
 
     DateLocale getDefaultDateLocale();
@@ -49,25 +52,27 @@ public interface PGWireConfiguration extends WorkerPoolConfiguration {
 
     String getDefaultUsername();
 
-    IODispatcherConfiguration getDispatcherConfiguration();
-
     default boolean getDumpNetworkTraffic() {
         return false;
     }
+
+    FactoryProvider getFactoryProvider();
+
+    int getForceRecvFragmentationChunkSize();
+
+    int getForceSendFragmentationChunkSize();
 
     int getInsertCacheBlockCount();
 
     int getInsertCacheRowCount();
 
-    int getInsertPoolCapacity();
-
     int getMaxBlobSizeOnQuery();
 
     int getNamedStatementCacheCapacity();
 
-    int getNamesStatementPoolCapacity();
+    int getNamedStatementLimit();
 
-    NetworkFacade getNetworkFacade();
+    int getNamesStatementPoolCapacity();
 
     int getPendingWritersCacheSize();
 
@@ -80,14 +85,6 @@ public interface PGWireConfiguration extends WorkerPoolConfiguration {
 
     String getReadOnlyUsername();
 
-    int getRecvBufferSize();
-
-    int getSelectCacheBlockCount();
-
-    int getSelectCacheRowCount();
-
-    int getSendBufferSize();
-
     String getServerVersion();
 
     int getUpdateCacheBlockCount();
@@ -95,6 +92,8 @@ public interface PGWireConfiguration extends WorkerPoolConfiguration {
     int getUpdateCacheRowCount();
 
     boolean isInsertCacheEnabled();
+
+    boolean isLegacyModeEnabled();
 
     boolean isReadOnlyUserEnabled();
 

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,10 +30,10 @@ import io.questdb.network.NetworkFacade;
 import io.questdb.network.NetworkFacadeImpl;
 import io.questdb.std.Misc;
 import io.questdb.std.Numbers;
-import io.questdb.std.Sinkable;
-import io.questdb.std.str.CharSinkBase;
-import io.questdb.std.str.StringSink;
+import io.questdb.std.str.*;
 import io.questdb.test.tools.TestUtils;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
@@ -45,7 +45,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import static io.questdb.log.HttpLogRecordSink.CRLF;
+import static io.questdb.log.HttpLogRecordUtf8Sink.CRLF;
 
 public class LogAlertSocketTest {
 
@@ -64,7 +64,7 @@ public class LogAlertSocketTest {
         TestUtils.assertMemoryLeak(() -> {
             NetworkFacade nf = new NetworkFacadeImpl() {
                 @Override
-                public int connect(int fd, long pSockaddr) {
+                public int connect(long fd, long pSockaddr) {
                     return -1;
                 }
             };
@@ -84,7 +84,7 @@ public class LogAlertSocketTest {
     public void testFailOver() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
             try (LogAlertSocket alertSkt = new LogAlertSocket(NetworkFacadeImpl.INSTANCE, "localhost:1234,localhost:1242", LOG)) {
-                final HttpLogRecordSink builder = new HttpLogRecordSink(alertSkt)
+                final HttpLogRecordUtf8Sink builder = new HttpLogRecordUtf8Sink(alertSkt)
                         .putHeader("localhost")
                         .setMark();
 
@@ -141,12 +141,12 @@ public class LogAlertSocketTest {
         TestUtils.assertMemoryLeak(() -> {
             final NetworkFacade nf = new NetworkFacadeImpl() {
                 @Override
-                public int connect(int fd, long pSockaddr) {
+                public int connect(long fd, long pSockaddr) {
                     return -1;
                 }
             };
             try (LogAlertSocket alertSkt = new LogAlertSocket(nf, "localhost:1234,localhost:1243", LOG)) {
-                final HttpLogRecordSink builder = new HttpLogRecordSink(alertSkt)
+                final HttpLogRecordUtf8Sink builder = new HttpLogRecordUtf8Sink(alertSkt)
                         .putHeader("localhost")
                         .setMark();
                 final int numHosts = alertSkt.getAlertHostsCount();
@@ -172,7 +172,7 @@ public class LogAlertSocketTest {
             final SOCountDownLatch haltLatch = new SOCountDownLatch(1);
             final CyclicBarrier startBarrier = new CyclicBarrier(2);
             final MockAlertTarget server = new MockAlertTarget(
-                    0,
+                    9863,
                     haltLatch::countDown,
                     () -> TestUtils.await(startBarrier)
             );
@@ -181,7 +181,7 @@ public class LogAlertSocketTest {
             int port = server.getPortNumber();
 
             try (LogAlertSocket alertSkt = new LogAlertSocket(NetworkFacadeImpl.INSTANCE, host + ":" + port, LOG)) {
-                final HttpLogRecordSink builder = new HttpLogRecordSink(alertSkt)
+                final HttpLogRecordUtf8Sink builder = new HttpLogRecordUtf8Sink(alertSkt)
                         .putHeader(host)
                         .setMark();
 
@@ -204,7 +204,7 @@ public class LogAlertSocketTest {
 
                 // send and fail after a re-connect delay
                 AtomicInteger reconnectCounter = new AtomicInteger();
-                Assert.assertFalse(alertSkt.send(builder.length(), reconnectCounter::incrementAndGet));
+                Assert.assertFalse(alertSkt.send(builder.size(), reconnectCounter::incrementAndGet));
                 Assert.assertEquals(2, reconnectCounter.get());
             }
         });
@@ -304,7 +304,8 @@ public class LogAlertSocketTest {
                         "Date: Thu, 09 Dec 2021 10:01:28 GMT\r\n" +
                         "Content-Length: 6o\r\n" +
                         "\r\n" +
-                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n");
+                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n"
+        );
     }
 
     @Test
@@ -330,12 +331,14 @@ public class LogAlertSocketTest {
                         "Content-Type: application/json\r\n" +
                         "Date: Thu, 09 Dec 2021 10:01:28 GMT\r\n" +
                         "\r\n" +
-                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n");
+                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n"
+        );
     }
 
     @Test
     public void testParseBadResponse2() throws Exception {
-        testParseStatusResponse("HTTP/1.1 400 Bad Request\r\n" +
+        testParseStatusResponse(
+                "HTTP/1.1 400 Bad Request\r\n" +
                         "Access-Control-Allow-Headers: Accept, Authorization, Content-Type, Origin\r\n" +
                         "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
                         "Access-Control-Allow-Origin: *\r\n" +
@@ -357,12 +360,14 @@ public class LogAlertSocketTest {
                         "Date: Thu, 09 Dec 2021 10:01:28 GMT\r\n" +
                         "Content-Length: 6\r\n" +
                         "\r\n" +
-                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n");
+                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n"
+        );
     }
 
     @Test
     public void testParseBadResponse3() throws Exception {
-        testParseStatusResponse("HTTP/1.1 400 Bad Request\r\n" +
+        testParseStatusResponse(
+                "HTTP/1.1 400 Bad Request\r\n" +
                         "Access-Control-Allow-Headers: Accept, Authorization, Content-Type, Origin\r\n" +
                         "Access-Control-Allow-Methods: GET, POST, DELETE, OPTIONS\r\n" +
                         "Access-Control-Allow-Origin: *\r\n" +
@@ -382,7 +387,8 @@ public class LogAlertSocketTest {
                         "Content-Type: application/json\r\n" +
                         "Date: Thu, 09 Dec 2021 10:01:28 GMT\r\n" +
                         "Content-Length: 66\r\n" +
-                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n");
+                        "{\"status\":\"error\",\"errorType\":\"bad_data\",\"error\":\"unexpected EOF\"}\r\n"
+        );
     }
 
     @Test
@@ -427,7 +433,7 @@ public class LogAlertSocketTest {
         TestUtils.assertMemoryLeak(() -> {
             NetworkFacade nf = new NetworkFacadeImpl() {
                 @Override
-                public int connect(int fd, long pSockaddr) {
+                public int connect(long fd, long pSockaddr) {
                     return -1;
                 }
             };
@@ -443,15 +449,15 @@ public class LogAlertSocketTest {
         TestUtils.assertMemoryLeak(() -> {
             NetworkFacade nf = new NetworkFacadeImpl() {
                 @Override
-                public int connect(int fd, long pSockaddr) {
+                public int connect(long fd, long pSockaddr) {
                     return -1;
                 }
             };
             MockLog log = new MockLog();
             try (LogAlertSocket alertSkt = new LogAlertSocket(nf, "", log)) {
-                LogRecordSink logRecord = new LogRecordSink(alertSkt.getInBufferPtr(), alertSkt.getInBufferSize());
+                LogRecordUtf8Sink logRecord = new LogRecordUtf8Sink(alertSkt.getInBufferPtr(), alertSkt.getInBufferSize());
                 logRecord.put(httpMessage);
-                alertSkt.logResponse(logRecord.length());
+                alertSkt.logResponse(logRecord.size());
                 TestUtils.assertEquals(expected, log.logRecord.sink);
             }
         });
@@ -472,11 +478,6 @@ public class LogAlertSocketTest {
 
         @Override
         public LogRecord critical() {
-            throw new UnsupportedOperationException();
-        }
-
-        @Override
-        public LogRecord criticalW() {
             throw new UnsupportedOperationException();
         }
 
@@ -555,13 +556,23 @@ public class LogAlertSocketTest {
         }
 
         @Override
-        public LogRecord $(CharSequence sequence) {
+        public LogRecord $(@Nullable CharSequence sequence) {
             sink.put(sequence);
             return this;
         }
 
         @Override
-        public LogRecord $(CharSequence sequence, int lo, int hi) {
+        public LogRecord $(@Nullable Utf8Sequence sequence) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public LogRecord $(@Nullable DirectUtf8Sequence sequence) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public LogRecord $(@NotNull CharSequence sequence, int lo, int hi) {
             sink.put(sequence, lo, hi);
             return this;
         }
@@ -594,22 +605,22 @@ public class LogAlertSocketTest {
         }
 
         @Override
-        public LogRecord $(Throwable e) {
+        public LogRecord $(@Nullable Throwable e) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public LogRecord $(File x) {
+        public LogRecord $(@Nullable File x) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public LogRecord $(Object x) {
+        public LogRecord $(@Nullable Object x) {
             throw new UnsupportedOperationException();
         }
 
         @Override
-        public LogRecord $(Sinkable x) {
+        public LogRecord $(@Nullable Sinkable x) {
             throw new UnsupportedOperationException();
         }
 
@@ -636,6 +647,17 @@ public class LogAlertSocketTest {
         }
 
         @Override
+        public LogRecord $size(long memoryBytes) {
+            sink.putSize(memoryBytes);
+            return this;
+        }
+
+        @Override
+        public LogRecord $substr(int from, @Nullable DirectUtf8Sequence sequence) {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public LogRecord $ts(long x) {
             throw new UnsupportedOperationException();
         }
@@ -643,6 +665,12 @@ public class LogAlertSocketTest {
         @Override
         public LogRecord $utf8(long lo, long hi) {
             throw new UnsupportedOperationException();
+        }
+
+        @Override
+        public LogRecord $uuid(long lo, long hi) {
+            Numbers.appendUuid(lo, hi, sink);
+            return this;
         }
 
         @Override
@@ -656,8 +684,26 @@ public class LogAlertSocketTest {
         }
 
         @Override
-        public CharSinkBase put(char c) {
+        public LogRecord put(@Nullable Utf8Sequence us) {
+            sink.put(us);
+            return this;
+        }
+
+        @Override
+        public LogRecord put(byte b) {
+            sink.put(b);
+            return this;
+        }
+
+        @Override
+        public LogRecord put(char c) {
             sink.put(c);
+            return this;
+        }
+
+        @Override
+        public Utf8Sink putNonAscii(long lo, long hi) {
+            sink.put(lo, hi);
             return this;
         }
 
@@ -667,7 +713,7 @@ public class LogAlertSocketTest {
         }
 
         @Override
-        public LogRecord utf8(CharSequence sequence) {
+        public LogRecord utf8(@Nullable CharSequence sequence) {
             throw new UnsupportedOperationException();
         }
     }

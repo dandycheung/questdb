@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,8 +32,11 @@ import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.engine.functions.GroupByFunction;
 import io.questdb.griffin.engine.groupby.InterpolationUtil;
 import io.questdb.std.BinarySequence;
+import io.questdb.std.Interval;
 import io.questdb.std.Long256;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
+import org.jetbrains.annotations.NotNull;
 
 public class InterpolationGroupByFunction implements GroupByFunction {
     private final GroupByFunction wrappedFunction;
@@ -53,13 +56,13 @@ public class InterpolationGroupByFunction implements GroupByFunction {
     }
 
     @Override
-    public void computeFirst(MapValue mapValue, Record record) {
-        wrappedFunction.computeFirst(mapValue, record);
+    public void computeFirst(MapValue mapValue, Record record, long rowId) {
+        wrappedFunction.computeFirst(mapValue, record, rowId);
     }
 
     @Override
-    public void computeNext(MapValue mapValue, Record record) {
-        wrappedFunction.computeNext(mapValue, record);
+    public void computeNext(MapValue mapValue, Record record, long rowId) {
+        wrappedFunction.computeNext(mapValue, record, rowId);
     }
 
     @Override
@@ -144,12 +147,22 @@ public class InterpolationGroupByFunction implements GroupByFunction {
     }
 
     @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public int getInt(Record rec) {
         int value = wrappedFunction.getInt(rec);
         if (interpolating) {
             return (int) InterpolationUtil.interpolate(startTime + current++ * interval, startTime, value, endTime, wrappedFunction.getInt(target));
         }
         return value;
+    }
+
+    @Override
+    public final @NotNull Interval getInterval(Record rec) {
+        throw new UnsupportedOperationException();
     }
 
     @Override
@@ -172,7 +185,7 @@ public class InterpolationGroupByFunction implements GroupByFunction {
     }
 
     @Override
-    public void getLong256(Record rec, CharSink sink) {
+    public void getLong256(Record rec, CharSink<?> sink) {
         wrappedFunction.getLong256(rec, sink);
     }
 
@@ -206,23 +219,13 @@ public class InterpolationGroupByFunction implements GroupByFunction {
     }
 
     @Override
-    public CharSequence getStr(Record rec) {
-        return wrappedFunction.getStr(rec);
+    public CharSequence getStrA(Record rec) {
+        return wrappedFunction.getStrA(rec);
     }
 
     @Override
-    public CharSequence getStr(Record rec, int arrayIndex) {
-        return wrappedFunction.getStr(rec, arrayIndex);
-    }
-
-    @Override
-    public void getStr(Record rec, CharSink sink) {
-        wrappedFunction.getStr(rec, sink);
-    }
-
-    @Override
-    public void getStr(Record rec, CharSink sink, int arrayIndex) {
-        wrappedFunction.getStr(rec, sink, arrayIndex);
+    public CharSequence getStrA(Record rec, int arrayIndex) {
+        return wrappedFunction.getStrA(rec, arrayIndex);
     }
 
     @Override
@@ -266,8 +269,33 @@ public class InterpolationGroupByFunction implements GroupByFunction {
     }
 
     @Override
-    public void pushValueTypes(ArrayColumnTypes columnTypes) {
-        wrappedFunction.pushValueTypes(columnTypes);
+    public int getValueIndex() {
+        return wrappedFunction.getValueIndex();
+    }
+
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        return wrappedFunction.getVarcharA(rec);
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        return wrappedFunction.getVarcharB(rec);
+    }
+
+    @Override
+    public int getVarcharSize(Record rec) {
+        return wrappedFunction.getVarcharSize(rec);
+    }
+
+    @Override
+    public void initValueIndex(int valueIndex) {
+        wrappedFunction.initValueIndex(valueIndex);
+    }
+
+    @Override
+    public void initValueTypes(ArrayColumnTypes columnTypes) {
+        wrappedFunction.initValueTypes(columnTypes);
     }
 
     @Override

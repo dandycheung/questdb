@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,84 +31,90 @@ import io.questdb.cairo.vm.api.MemoryCMARW;
 import io.questdb.cairo.vm.api.MemoryCMR;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
+import io.questdb.std.FilesFacade;
 import io.questdb.std.MemoryTag;
 
 public class RecoverVarIndex extends RebuildColumnBase {
     private static final Log LOG = LogFactory.getLog(RecoverVarIndex.class);
 
+    public RecoverVarIndex(CairoConfiguration configuration) {
+        super(configuration);
+    }
+
     @Override
     protected void doReindex(
-            ColumnVersionReader columnVersionReader, int columnWriterIndex, CharSequence columnName,
-            CharSequence partitionName,
-            long partitionNameTxn, long partitionSize, long partitionTimestamp, int indexValueBlockCapacity
+            FilesFacade ff,
+            ColumnVersionReader columnVersionReader,
+            int columnWriterIndex,
+            CharSequence columnName,
+            long partitionNameTxn,
+            long partitionSize,
+            long partitionTimestamp,
+            int partitionBy,
+            int indexValueBlockCapacity
     ) {
         long columnNameTxn = columnVersionReader.getColumnNameTxn(partitionTimestamp, columnWriterIndex);
         long columnTop = columnVersionReader.getColumnTop(partitionTimestamp, columnWriterIndex);
 
         if (columnTop == -1L) {
-            LOG.info().$("not rebuilding column ").$(columnName).$(" in partition ").$ts(partitionTimestamp).$(", column not added to partition").$();
+            LOG.info().$("not rebuilding column ").$(columnName)
+                    .$(" in partition ").$ts(partitionTimestamp)
+                    .$(", column not added to partition")
+                    .$();
             return;
         }
 
-        path.trimTo(rootLen).concat(partitionName);
-        TableUtils.txnPartitionConditionally(path, partitionNameTxn);
-        path.concat(columnName);
-        int colNameLen = path.length();
-        path.put(".d");
-        if (columnNameTxn != -1L) {
-            path.put('.').put(columnNameTxn);
-        }
-        LOG.info().$("reading: ").$(path).$();
+        int trimTo = path.size();
+        TableUtils.setPathForNativePartition(path, partitionBy, partitionTimestamp, partitionNameTxn);
 
-        long maxOffset = ff.length(path.$());
-
-        try (MemoryCMR roMem = new MemoryCMRImpl(
-                ff,
-                path.$(),
-                maxOffset,
-                MemoryTag.MMAP_DEFAULT
-        )) {
-
-            path.trimTo(colNameLen).put(".i");
+        try {
+            path.concat(columnName);
+            int colNameLen = path.size();
+            path.put(".d");
             if (columnNameTxn != -1L) {
                 path.put('.').put(columnNameTxn);
             }
-            LOG.info().$("writing: ").$(path).$();
+            LOG.info().$("reading: ").$(path).$();
 
-            try (MemoryCMARW rwMem = new MemoryCMARWImpl(
-                    ff,
-                    path.$(),
-                    8 * 1024 * 1024,
-                    0,
-                    MemoryTag.MMAP_DEFAULT,
-                    0
-            )) {
-                long expectedRowCount = partitionSize - columnTop;
-                LOG.info().$("data file length: ").$(maxOffset).$(", expected record count: ").$(expectedRowCount).$();
+            long maxOffset = ff.length(path.$());
 
-                // index
-                long offset = 0;
-                int rows = 0;
-                while (rows < expectedRowCount && offset + 3 < maxOffset) {
-                    int len = roMem.getInt(offset);
-                    rwMem.putLong(offset);
+            try (MemoryCMR roMem = new MemoryCMRImpl(ff, path.$(), maxOffset, MemoryTag.MMAP_DEFAULT)) {
+                path.trimTo(colNameLen).put(".i");
+                if (columnNameTxn != -1L) {
+                    path.put('.').put(columnNameTxn);
+                }
+                LOG.info().$("writing: ").$(path).$();
 
-                    if (len > -1) {
-                        offset += 4 + len * 2L;
-                    } else {
-                        offset += 4;
+                try (MemoryCMARW rwMem = new MemoryCMARWImpl(ff, path.$(), 8 * 1024 * 1024, 0, MemoryTag.MMAP_DEFAULT, 0)) {
+                    long expectedRowCount = partitionSize - columnTop;
+                    LOG.info().$("data file length: ").$(maxOffset).$(", expected record count: ").$(expectedRowCount).$();
+
+                    // index
+                    long offset = 0;
+                    int rows = 0;
+                    while (rows < expectedRowCount && offset + 3 < maxOffset) {
+                        int len = roMem.getInt(offset);
+                        rwMem.putLong(offset);
+
+                        if (len > -1) {
+                            offset += 4 + len * 2L;
+                        } else {
+                            offset += 4;
+                        }
+                        rows++;
                     }
-                    rows++;
+                    if (rows != expectedRowCount) {
+                        throw CairoException.critical(0)
+                                .put(" rebuild var index file failed [path=").put(path)
+                                .put(", expectedRows=").put(expectedRowCount)
+                                .put(", actualRows=").put(rows).put(']');
+                    }
+                    rwMem.putLong(offset);
+                    LOG.info().$("write complete. Index file length: ").$(rwMem.getAppendOffset()).$();
                 }
-                if (rows != expectedRowCount) {
-                    throw CairoException.critical(0)
-                            .put(" rebuild var index file failed [path=").put(path)
-                            .put(", expectedRows=").put(expectedRowCount)
-                            .put(", actualRows=").put(rows).put(']');
-                }
-                rwMem.putLong(offset);
-                LOG.info().$("write complete. Index file length: ").$(rwMem.getAppendOffset()).$();
             }
+        } finally {
+            path.trimTo(trimTo);
         }
     }
 

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,13 +24,14 @@
 
 package io.questdb.test.cutlass.line.tcp;
 
-import io.questdb.cutlass.line.LineProtoException;
+import io.questdb.cutlass.line.LineException;
 import io.questdb.cutlass.line.tcp.LineTcpParser;
 import io.questdb.cutlass.line.tcp.LineTcpParser.ParseResult;
 import io.questdb.cutlass.line.tcp.LineTcpParser.ProtoEntity;
-import io.questdb.test.cutlass.line.udp.LineUdpLexerTest;
 import io.questdb.std.*;
 import io.questdb.std.str.StringSink;
+import io.questdb.std.str.Utf8s;
+import io.questdb.test.cutlass.line.udp.LineUdpLexerTest;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
 import org.junit.BeforeClass;
@@ -38,7 +39,7 @@ import org.junit.Test;
 
 
 public class LineTcpParser2Test extends LineUdpLexerTest {
-    private final LineTcpParser lineTcpParser = new LineTcpParser(false, false);
+    private final LineTcpParser lineTcpParser = new LineTcpParser();
     private boolean onErrorLine;
     private long startOfLineAddr;
 
@@ -195,7 +196,7 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
 
     @Test
     public void testNoFieldsAndNotTags() {
-        assertThat("measurement 10000--ERROR=INCOMPLETE_FIELD--", "measurement 10000\n"); // One space char
+        assertThat("measurement 10000--ERROR=MISSING_FIELD_VALUE--", "measurement 10000\n"); // One space char
         assertThat("measurement  10000--ERROR=NO_FIELDS--", "measurement  10000\n"); // Two space chars
     }
 
@@ -239,7 +240,7 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
     @Test
     public void testNonAscii() {
         assertThat(
-                "weather1 terület=\"europeI\",temperature=80.0,humidity=24.0,hőmérséklet=18.0,notes=5072.0,ветер=63.0 1465839830102351000--non ascii--\n",
+                "weather1 terület=\"europeI\",temperature=80.0,humidity=24.0,hőmérséklet=18.0,notes=5072.0,ветер=63.0 1465839830102351000\n",
                 "weather1 terület=\"europeI\",temperature=80.0,humidity=24.0,hőmérséklet=18.0,notes=5072.0,ветер=63.0 1465839830102351000\n"
         );
     }
@@ -267,19 +268,38 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
     @Test
     public void testSupportsUtf8Chars() {
         assertThat(
-                "लаблअца,символ=значение1 поле=\"значение2\",поле2=\"значение3\" 123--non ascii--\n",
+                "लаблअца,символ=значение1 поле=\"значение2\",поле2=\"значение3\" 123\n",
                 "लаблअца,символ=значение1 поле=\"значение2\",поле2=\"значение3\" 123\n"
         );
 
         assertThat(
-                "लаблअца,символ=значение2 161--non ascii--\n",
+                "लаблअца,символ=значение2 161\n",
                 "लаблअца,символ=значение2  161\n"
         );
 
-
         assertThat(
-                "table,tag=ok field=\"значение2 non ascii quoted\" 161--non ascii--\n",
+                "table,tag=ok field=\"значение2 non ascii quoted\" 161\n",
                 "table,tag=ok field=\"значение2 non ascii quoted\" 161\n"
+        );
+    }
+
+    @Test
+    public void testTimestampSuffixes() {
+        assertThat(
+                "measurement,tag=value 100000\n",
+                "measurement,tag=value 100000\n"
+        );
+        assertThat(
+                "measurement,tag=value 100000n\n",
+                "measurement,tag=value 100000n\n"
+        );
+        assertThat(
+                "measurement,tag=value 100000t\n",
+                "measurement,tag=value 100000t\n"
+        );
+        assertThat(
+                "measurement,tag=value 100000m\n",
+                "measurement,tag=value 100000m\n"
         );
     }
 
@@ -433,7 +453,7 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
 
     private void assembleLine() {
         int nEntities = lineTcpParser.getEntityCount();
-        Chars.utf8Decode(lineTcpParser.getMeasurementName().getLo(), lineTcpParser.getMeasurementName().getHi(), sink);
+        Utf8s.utf8ToUtf16(lineTcpParser.getMeasurementName().lo(), lineTcpParser.getMeasurementName().hi(), sink);
         int n = 0;
         boolean tagsComplete = false;
         while (n < nEntities) {
@@ -444,12 +464,12 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
             } else {
                 sink.put(',');
             }
-            Chars.utf8Decode(entity.getName().getLo(), entity.getName().getHi(), sink);
+            Utf8s.utf8ToUtf16(entity.getName().lo(), entity.getName().hi(), sink);
             sink.put('=');
             switch (entity.getType()) {
                 case LineTcpParser.ENTITY_TYPE_STRING:
                     sink.put('"');
-                    Chars.utf8Decode(entity.getValue().getLo(), entity.getValue().getHi(), sink);
+                    Utf8s.utf8ToUtf16(entity.getValue().lo(), entity.getValue().hi(), sink);
                     sink.put('"');
                     break;
                 case LineTcpParser.ENTITY_TYPE_INTEGER:
@@ -457,7 +477,7 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
                     sink.put(entity.getValue()).put('i');
                     break;
                 default:
-                    Chars.utf8Decode(entity.getValue().getLo(), entity.getValue().getHi(), sink);
+                    Utf8s.utf8ToUtf16(entity.getValue().lo(), entity.getValue().hi(), sink);
                     break;
             }
         }
@@ -465,10 +485,19 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
         if (lineTcpParser.hasTimestamp()) {
             sink.put(' ');
             Numbers.append(sink, lineTcpParser.getTimestamp());
-        }
-
-        if (lineTcpParser.hasNonAsciiChars()) {
-            sink.put("--non ascii--");
+            if (lineTcpParser.getTimestampUnit() != LineTcpParser.ENTITY_UNIT_NONE) {
+                switch (lineTcpParser.getTimestampUnit()) {
+                    case LineTcpParser.ENTITY_UNIT_NANO:
+                        sink.put("n");
+                        break;
+                    case LineTcpParser.ENTITY_UNIT_MICRO:
+                        sink.put("t");
+                        break;
+                    case LineTcpParser.ENTITY_UNIT_MILLI:
+                        sink.put("m");
+                        break;
+                }
+            }
         }
         sink.put('\n');
     }
@@ -487,7 +516,7 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
                         assembleLine();
                     } else {
                         final StringSink tmpSink = new StringSink();
-                        if (Chars.utf8Decode(startOfLineAddr, lineTcpParser.getBufferAddress(), tmpSink)) {
+                        if (Utf8s.utf8ToUtf16(startOfLineAddr, lineTcpParser.getBufferAddress(), tmpSink)) {
                             sink.put(tmpSink.toString());
                         }
                         sink.put("--ERROR=");
@@ -530,11 +559,11 @@ public class LineTcpParser2Test extends LineUdpLexerTest {
         lineTcpParser.of(mem);
     }
 
-    protected void assertThat(CharSequence expected, String lineStr) throws LineProtoException {
+    protected void assertThat(CharSequence expected, String lineStr) throws LineException {
         assertThat(expected, lineStr, 1);
     }
 
-    protected void assertThat(CharSequence expected, String lineStr, int start) throws LineProtoException {
+    protected void assertThat(CharSequence expected, String lineStr, int start) throws LineException {
         byte[] line = lineStr.getBytes(Files.UTF_8);
         final int len = line.length;
         final boolean endWithEOL = line[len - 1] == '\n' || line[len - 1] == '\r';

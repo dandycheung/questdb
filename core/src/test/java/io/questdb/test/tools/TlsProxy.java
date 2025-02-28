@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -35,9 +35,10 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.ServerSocket;
 import java.net.Socket;
-import java.security.*;
-import java.security.cert.CertificateException;
+import java.security.KeyStore;
+import java.security.SecureRandom;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -49,6 +50,7 @@ public final class TlsProxy {
     private final char[] keystorePassword;
     private final Set<Link> links = Collections.newSetFromMap(new ConcurrentHashMap<>());
     private Thread acceptorThread;
+    private volatile boolean killAfterAccepting;
     private ServerSocket serverSocket;
     private volatile boolean shutdownRequested;
 
@@ -59,8 +61,21 @@ public final class TlsProxy {
         this.keystorePassword = keystorePassword;
     }
 
+    public synchronized void killAfterAccepting() {
+        killAfterAccepting = true;
+    }
+
+    public synchronized void killConnections() {
+        Iterator<Link> iterator = links.iterator();
+        while (iterator.hasNext()) {
+            Link link = iterator.next();
+            link.kill();
+            iterator.remove();
+        }
+    }
+
     public int start() {
-        try {
+        return TestUtils.unchecked(() -> {
             SSLContext sslContext = SSLContext.getInstance("TLS");
             TrustManagerFactory tmf = TrustManagerFactory.getInstance(TrustManagerFactory.getDefaultAlgorithm());
             tmf.init(KeyStore.getInstance(KeyStore.getDefaultType()));
@@ -78,26 +93,14 @@ public final class TlsProxy {
             acceptorThread = new Thread(() -> acceptorLoop(serverSocket));
             acceptorThread.start();
             return serverSocket.getLocalPort();
-        } catch (NoSuchAlgorithmException | IOException | KeyManagementException | CertificateException |
-                 KeyStoreException | UnrecoverableKeyException e) {
-            throw new RuntimeException(e);
-        }
+        });
     }
 
     public synchronized void stop() {
         shutdownRequested = true;
-        try {
-            serverSocket.close();
-        } catch (IOException e) {
-            throw new RuntimeException(e);
-        }
+        TestUtils.unchecked(() -> serverSocket.close());
         acceptorThread.interrupt();
-        try {
-            acceptorThread.join();
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new RuntimeException(e);
-        }
+        TestUtils.unchecked(() -> acceptorThread.join());
         for (Link link : links) {
             link.shutDown();
         }
@@ -133,6 +136,11 @@ public final class TlsProxy {
                     closeQuietly(backendSocket);
                     return;
                 }
+                if (killAfterAccepting) {
+                    closeQuietly(frontendSocket);
+                    closeQuietly(backendSocket);
+                    continue;
+                }
                 Link link = new Link(frontendSocket, backendSocket);
                 links.add(link);
                 link.start();
@@ -141,17 +149,22 @@ public final class TlsProxy {
     }
 
     private static class Link {
+        private final Socket backend;
         private final Pump backendToFrontend;
+        private final Socket frontend;
         private final Pump frontendToBackend;
 
         private Link(Socket frontend, Socket backend) {
             AtomicInteger race = new AtomicInteger(2);
-            try {
-                frontendToBackend = new Pump(frontend.getInputStream(), backend.getOutputStream(), race, "front->backend");
-                backendToFrontend = new Pump(backend.getInputStream(), frontend.getOutputStream(), race, "backend->frontend");
-            } catch (IOException e) {
-                throw new RuntimeException(e);
-            }
+            this.frontend = frontend;
+            this.backend = backend;
+            frontendToBackend = TestUtils.unchecked(() -> new Pump(frontend.getInputStream(), backend.getOutputStream(), race, "front->backend"));
+            backendToFrontend = TestUtils.unchecked(() -> new Pump(backend.getInputStream(), frontend.getOutputStream(), race, "backend->frontend"));
+        }
+
+        private void kill() {
+            closeQuietly(frontend);
+            closeQuietly(backend);
         }
 
         private void shutDown() {
@@ -229,11 +242,7 @@ public final class TlsProxy {
         private void shutdown() {
             shutdownRequested = true;
             owningThread.interrupt();
-            try {
-                owningThread.join();
-            } catch (InterruptedException e) {
-                throw new RuntimeException(e);
-            }
+            TestUtils.unchecked(() -> owningThread.join());
         }
     }
 }

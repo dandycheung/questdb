@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,10 +24,17 @@
 
 package io.questdb.test.cairo.wal;
 
-import io.questdb.cairo.*;
+import io.questdb.PropertyKey;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.sql.TableRecordMetadata;
+import io.questdb.cairo.wal.WalUtils;
 import io.questdb.cairo.wal.WalWriter;
+import io.questdb.cairo.wal.seq.TableTransactionLog;
 import io.questdb.cairo.wal.seq.TransactionLogCursor;
 import io.questdb.std.ObjList;
+import io.questdb.std.Rnd;
 import io.questdb.std.str.Path;
 import io.questdb.test.AbstractCairoTest;
 import io.questdb.test.cairo.TableModel;
@@ -42,9 +49,21 @@ import java.util.concurrent.atomic.AtomicReference;
 
 public class TableSequencerImplTest extends AbstractCairoTest {
     @BeforeClass
-    public static void setUpStatic() {
-        recreateDistressedSequencerAttempts = Integer.MAX_VALUE;
+    public static void setUpStatic() throws Exception {
+        setProperty(PropertyKey.CAIRO_WAL_RECREATE_DISTRESSED_SEQUENCER_ATTEMPTS, Integer.MAX_VALUE);
         AbstractCairoTest.setUpStatic();
+    }
+
+    @Test
+    public void testCanReadStructureVersionV1() {
+        testTableTransactionLogCanReadStructureVersion();
+    }
+
+    @Test
+    public void testCanReadStructureVersionV2() {
+        Rnd rnd = TestUtils.generateRandom(LOG);
+        node1.setProperty(PropertyKey.CAIRO_DEFAULT_SEQ_PART_TXN_COUNT, rnd.nextInt(20) + 10);
+        testTableTransactionLogCanReadStructureVersion();
     }
 
     @Test
@@ -58,20 +77,24 @@ public class TableSequencerImplTest extends AbstractCairoTest {
         runAddColumnRace(
                 barrier, tableName, iterations, 1, exception,
                 () -> {
-                    try (GenericTableRecordMetadata metadata = new GenericTableRecordMetadata()) {
+                    try {
                         TestUtils.await(barrier);
 
-                        TableToken tableToken = engine.getTableToken(tableName);
+                        TableToken tableToken = engine.verifyTableName(tableName);
+                        int metadataColumnCount;
                         do {
-                            engine.getTableSequencerAPI().getTableMetadata(tableToken, metadata);
-                            Assert.assertEquals(metadata.getColumnCount() - initialColumnCount, metadata.getStructureVersion());
-                        } while (metadata.getColumnCount() < initialColumnCount + iterations && exception.get() == null);
+                            try (TableRecordMetadata metadata = engine.getSequencerMetadata(tableToken)) {
+                                Assert.assertEquals(metadata.getColumnCount() - initialColumnCount, metadata.getMetadataVersion());
+                                metadataColumnCount = metadata.getColumnCount();
+                            }
+                        } while (metadataColumnCount < initialColumnCount + iterations && exception.get() == null);
                     } catch (Throwable e) {
                         exception.set(e);
                     } finally {
                         Path.clearThreadLocals();
                     }
-                });
+                }
+        );
     }
 
     @Test
@@ -91,7 +114,7 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                         TestUtils.await(barrier);
                         int threadIdValue = threadId.getAndIncrement();
                         long sv = 0;
-                        TableToken tableToken = engine.getTableToken(tableName);
+                        TableToken tableToken = engine.verifyTableName(tableName);
                         do {
                             long sv2 = engine.getTableSequencerAPI().lastTxn(tableToken);
                             if (threadIdValue != 0) {
@@ -115,7 +138,8 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                     } finally {
                         Path.clearThreadLocals();
                     }
-                });
+                }
+        );
     }
 
     @Test
@@ -130,7 +154,7 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                 () -> {
                     try {
                         TestUtils.await(barrier);
-                        TableToken tableToken = engine.getTableToken(tableName);
+                        TableToken tableToken = engine.verifyTableName(tableName);
                         do {
                             engine.getTableSequencerAPI().lastTxn(tableToken);
                         } while (engine.getTableSequencerAPI().lastTxn(tableToken) < iterations && exception.get() == null);
@@ -139,7 +163,8 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                     } finally {
                         Path.clearThreadLocals();
                     }
-                });
+                }
+        );
     }
 
     @Test
@@ -155,7 +180,7 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                 () -> {
                     try {
                         TestUtils.await(barrier);
-                        TableToken tableToken = engine.getTableToken(tableName);
+                        TableToken tableToken = engine.verifyTableName(tableName);
                         long lastTxn = 0;
                         do {
                             try (TransactionLogCursor cursor = engine.getTableSequencerAPI().getCursor(tableToken, lastTxn)) {
@@ -169,17 +194,17 @@ public class TableSequencerImplTest extends AbstractCairoTest {
                     } finally {
                         Path.clearThreadLocals();
                     }
-                });
+                }
+        );
     }
 
     private void runAddColumnRace(CyclicBarrier barrier, String tableName, int iterations, int readerThreads, AtomicReference<Throwable> exception, Runnable runnable) throws Exception {
         assertMemoryLeak(() -> {
-            try (TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
+            TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
                     .col("int", ColumnType.INT)
                     .timestamp("ts")
-                    .wal()) {
-                createTable(model);
-            }
+                    .wal();
+            createTable(model);
             ObjList<Thread> readerThreadList = new ObjList<>();
             for (int i = 0; i < readerThreads; i++) {
                 Thread t = new Thread(runnable);
@@ -200,7 +225,7 @@ public class TableSequencerImplTest extends AbstractCairoTest {
     }
 
     private void runColumnAdd(CyclicBarrier barrier, String tableName, AtomicReference<Throwable> exception, int iterations) {
-        try (WalWriter ww = engine.getWalWriter(securityContext, engine.getTableToken(tableName))) {
+        try (WalWriter ww = engine.getWalWriter(engine.verifyTableName(tableName))) {
             TestUtils.await(barrier);
 
             for (int i = 0; i < iterations; i++) {
@@ -211,6 +236,34 @@ public class TableSequencerImplTest extends AbstractCairoTest {
             }
         } catch (Throwable e) {
             exception.set(e);
+        }
+    }
+
+    private void testTableTransactionLogCanReadStructureVersion() {
+        final String tableName = testName.getMethodName();
+        int iterations = 100;
+
+        TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
+                .col("int", ColumnType.INT)
+                .timestamp("ts")
+                .wal();
+        createTable(model);
+
+        TableToken tableToken = engine.verifyTableName(tableName);
+        try (
+                Path path = new Path();
+                WalWriter ww = engine.getWalWriter(tableToken)
+        ) {
+
+            path.concat(engine.getConfiguration().getDbRoot()).concat(ww.getTableToken()).concat(WalUtils.SEQ_DIR);
+            for (int i = 0; i < iterations; i++) {
+                addColumn(ww, "newCol" + i, ColumnType.INT);
+                try (TableRecordMetadata metadata = engine.getSequencerMetadata(tableToken)) {
+                    Assert.assertEquals(i + 1, metadata.getMetadataVersion());
+                    long seqMeta = TableTransactionLog.readMaxStructureVersion(engine.getConfiguration().getFilesFacade(), path);
+                    Assert.assertEquals(metadata.getMetadataVersion(), seqMeta);
+                }
+            }
         }
     }
 }

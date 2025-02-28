@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,23 +26,20 @@ package io.questdb.test.std;
 
 import io.questdb.cairo.CairoException;
 import io.questdb.std.*;
-import io.questdb.std.str.DirectByteCharSequence;
+import io.questdb.std.str.DirectUtf8String;
 import io.questdb.std.str.Path;
 import io.questdb.std.str.StringSink;
+import io.questdb.test.AbstractTest;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
 import org.junit.Assume;
-import org.junit.ClassRule;
 import org.junit.Test;
-import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 
-public class IOURingImplTest {
+public class IOURingImplTest extends AbstractTest {
 
     private static final IOURingFacade rf = new IOURingFacadeImpl();
-    @ClassRule
-    public static TemporaryFolder temp = new TemporaryFolder();
 
     @Test(expected = CairoException.class)
     public void testFailsToInit() {
@@ -91,7 +88,7 @@ public class IOURingImplTest {
             TestUtils.writeStringToFile(file, txt);
 
             try (Path path = new Path()) {
-                int fd = Files.openRO(path.of(file.getAbsolutePath()).$());
+                long fd = Files.openRO(path.of(file.getAbsolutePath()).$());
                 Assert.assertTrue(fd > -1);
                 long[] bufs = new long[inFlight];
                 for (int i = 0; i < inFlight; i++) {
@@ -118,7 +115,7 @@ public class IOURingImplTest {
                         Assert.assertEquals(txtLen, ring.getCqeRes());
                     }
 
-                    DirectByteCharSequence txtInBuf = new DirectByteCharSequence();
+                    DirectUtf8String txtInBuf = new DirectUtf8String();
                     for (int i = 0; i < inFlight; i++) {
                         txtInBuf.of(bufs[i], bufs[i] + txtLen);
                         TestUtils.assertEquals(txt.substring(i * txtLen, (i + 1) * txtLen), txtInBuf);
@@ -179,7 +176,7 @@ public class IOURingImplTest {
             TestUtils.writeStringToFile(file, txt);
 
             try (Path path = new Path()) {
-                int fd = Files.openRO(path.of(file.getAbsolutePath()).$());
+                long fd = Files.openRO(path.of(file.getAbsolutePath()).$());
                 Assert.assertTrue(fd > -1);
                 long buf = Unsafe.malloc(txtLen, MemoryTag.NATIVE_DEFAULT);
 
@@ -194,7 +191,7 @@ public class IOURingImplTest {
                     Assert.assertEquals(id, ring.getCqeId());
                     Assert.assertEquals(txtLen, ring.getCqeRes());
 
-                    DirectByteCharSequence txtInBuf = new DirectByteCharSequence().of(buf, buf + txtLen);
+                    DirectUtf8String txtInBuf = new DirectUtf8String().of(buf, buf + txtLen);
                     TestUtils.assertEquals(txt.substring(0, txtLen), txtInBuf);
                 } finally {
                     Files.close(fd);

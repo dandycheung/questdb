@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,24 +24,23 @@
 
 package io.questdb.test;
 
-import io.questdb.Bootstrap;
 import io.questdb.PropertyKey;
 import io.questdb.ServerMain;
-import io.questdb.cairo.*;
-import io.questdb.cairo.security.AllowAllCairoSecurityContext;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableToken;
 import io.questdb.cairo.sql.OperationFuture;
 import io.questdb.griffin.SqlCompiler;
 import io.questdb.griffin.SqlExecutionContext;
-import io.questdb.griffin.SqlExecutionContextImpl;
 import io.questdb.log.LogFactory;
-import io.questdb.std.Files;
 import io.questdb.std.Misc;
-import io.questdb.std.str.Path;
 import io.questdb.std.str.StringSink;
 import io.questdb.test.cairo.TableModel;
-import org.junit.AfterClass;
+import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
-import org.junit.BeforeClass;
+import org.junit.Before;
 import org.junit.Test;
 
 import java.sql.Connection;
@@ -60,36 +59,24 @@ public class ServerMainVectorGroupByTest extends AbstractBootstrapTest {
 
     private static final int PG_WIRE_POOL_SIZE = 4;
     private static final int SHARED_POOL_SIZE = 1;
-    private static final int pgPort = PG_PORT + 10;
-    private static Path path;
+    private static final int pgPortDelta = 17;
+    private static final int pgPort = PG_PORT + pgPortDelta;
 
-    @BeforeClass
-    public static void setUpStatic() throws Exception {
-        AbstractBootstrapTest.setUpStatic();
-        path = new Path().of(root).concat("db").$();
-        try {
-            int pathLen = path.length();
-            Files.remove(path.concat("sys.column_versions_purge_log.lock").$());
-            Files.remove(path.trimTo(pathLen).concat("telemetry_config.lock").$());
-            createDummyConfiguration(
-                    HTTP_PORT + 10,
-                    HTTP_MIN_PORT + 10,
-                    pgPort,
-                    ILP_PORT + 10,
-                    PropertyKey.PG_WORKER_COUNT.getPropertyPath() + "=" + PG_WIRE_POOL_SIZE,
-                    PropertyKey.SHARED_WORKER_COUNT.getPropertyPath() + "=" + SHARED_POOL_SIZE,
-                    // Set vector aggregate queue to a small size to have better chances of work stealing.
-                    PropertyKey.CAIRO_VECTOR_AGGREGATE_QUEUE_CAPACITY.getPropertyPath() + "=2"
-            );
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
-    }
-
-    @AfterClass
-    public static void tearDownStatic() throws Exception {
-        Misc.free(path);
-        AbstractBootstrapTest.tearDownStatic();
+    @Override
+    @Before
+    public void setUp() {
+        super.setUp();
+        TestUtils.unchecked(() -> createDummyConfiguration(
+                HTTP_PORT + pgPortDelta,
+                HTTP_MIN_PORT + pgPortDelta,
+                pgPort,
+                ILP_PORT + pgPortDelta,
+                root,
+                PropertyKey.PG_WORKER_COUNT.getPropertyPath() + "=" + PG_WIRE_POOL_SIZE,
+                PropertyKey.SHARED_WORKER_COUNT.getPropertyPath() + "=" + SHARED_POOL_SIZE,
+                // Set vector aggregate queue to a small size to have better chances of work stealing.
+                PropertyKey.CAIRO_VECTOR_AGGREGATE_QUEUE_CAPACITY.getPropertyPath() + "=2"
+        ));
     }
 
     @Test
@@ -97,19 +84,22 @@ public class ServerMainVectorGroupByTest extends AbstractBootstrapTest {
         String tableName = testName.getMethodName();
         assertMemoryLeak(() -> {
             try (
-                    ServerMain qdb = new ServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION);
-                    SqlCompiler compiler = new SqlCompiler(qdb.getCairoEngine());
-                    SqlExecutionContext context = executionContext(qdb.getCairoEngine())
+                    ServerMain qdb = new ServerMain(getServerMainArgs());
+                    SqlCompiler compiler = qdb.getEngine().getSqlCompiler()
             ) {
-                qdb.start();
-                CairoEngine engine = qdb.getCairoEngine();
-                CairoConfiguration cairoConfig = qdb.getConfiguration().getCairoConfiguration();
+                CairoEngine engine1 = qdb.getEngine();
+                try (SqlExecutionContext context = TestUtils.createSqlExecutionCtx(engine1)
+                ) {
+                    qdb.start();
+                    CairoEngine engine = qdb.getEngine();
+                    CairoConfiguration cairoConfig = qdb.getConfiguration().getCairoConfiguration();
 
-                Assert.assertEquals(SHARED_POOL_SIZE, qdb.getConfiguration().getWorkerPoolConfiguration().getWorkerCount());
-                Assert.assertEquals(PG_WIRE_POOL_SIZE, qdb.getConfiguration().getPGWireConfiguration().getWorkerCount());
+                    Assert.assertEquals(SHARED_POOL_SIZE, qdb.getConfiguration().getWorkerPoolConfiguration().getWorkerCount());
+                    Assert.assertEquals(PG_WIRE_POOL_SIZE, qdb.getConfiguration().getPGWireConfiguration().getWorkerCount());
 
-                TableToken tableToken = createPopulateTable(cairoConfig, engine, compiler, context, tableName);
-                assertQueryDoesNotFail("select max(l), s from " + tableToken.getTableName(), 5);
+                    TableToken tableToken = createPopulateTable(cairoConfig, engine, compiler, context, tableName);
+                    assertQueryDoesNotFail("select max(l), s from " + tableToken.getTableName(), 5);
+                }
             }
         });
     }
@@ -119,19 +109,22 @@ public class ServerMainVectorGroupByTest extends AbstractBootstrapTest {
         String tableName = testName.getMethodName();
         assertMemoryLeak(() -> {
             try (
-                    ServerMain qdb = new ServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION);
-                    SqlCompiler compiler = new SqlCompiler(qdb.getCairoEngine());
-                    SqlExecutionContext context = executionContext(qdb.getCairoEngine())
+                    ServerMain qdb = new ServerMain(getServerMainArgs());
+                    SqlCompiler compiler = qdb.getEngine().getSqlCompiler()
             ) {
-                qdb.start();
-                CairoEngine engine = qdb.getCairoEngine();
-                CairoConfiguration cairoConfig = qdb.getConfiguration().getCairoConfiguration();
+                CairoEngine engine1 = qdb.getEngine();
+                try (SqlExecutionContext context = TestUtils.createSqlExecutionCtx(engine1)
+                ) {
+                    qdb.start();
+                    CairoEngine engine = qdb.getEngine();
+                    CairoConfiguration cairoConfig = qdb.getConfiguration().getCairoConfiguration();
 
-                Assert.assertEquals(SHARED_POOL_SIZE, qdb.getConfiguration().getWorkerPoolConfiguration().getWorkerCount());
-                Assert.assertEquals(PG_WIRE_POOL_SIZE, qdb.getConfiguration().getPGWireConfiguration().getWorkerCount());
+                    Assert.assertEquals(SHARED_POOL_SIZE, qdb.getConfiguration().getWorkerPoolConfiguration().getWorkerCount());
+                    Assert.assertEquals(PG_WIRE_POOL_SIZE, qdb.getConfiguration().getPGWireConfiguration().getWorkerCount());
 
-                TableToken tableToken = createPopulateTable(cairoConfig, engine, compiler, context, tableName);
-                assertQueryDoesNotFail("select max(l) from " + tableToken.getTableName(), 1);
+                    TableToken tableToken = createPopulateTable(cairoConfig, engine, compiler, context, tableName);
+                    assertQueryDoesNotFail("select max(l) from " + tableToken.getTableName(), 1);
+                }
             }
         });
     }
@@ -150,15 +143,6 @@ public class ServerMainVectorGroupByTest extends AbstractBootstrapTest {
         }
     }
 
-    private static SqlExecutionContext executionContext(CairoEngine engine) {
-        return new SqlExecutionContextImpl(engine, 1).with(
-                AllowAllCairoSecurityContext.INSTANCE,
-                null,
-                null,
-                -1,
-                null);
-    }
-
     private TableToken createPopulateTable(
             CairoConfiguration cairoConfig,
             CairoEngine engine,
@@ -166,26 +150,24 @@ public class ServerMainVectorGroupByTest extends AbstractBootstrapTest {
             SqlExecutionContext context,
             String tableName
     ) throws Exception {
-        StringSink sink = Misc.getThreadLocalBuilder();
+        StringSink sink = Misc.getThreadLocalSink();
         sink.put("CREATE TABLE ");
         sink.put(tableName).put('(');
         sink.put(" l LONG,");
         sink.put(" s SYMBOL,");
         sink.put(" ts TIMESTAMP");
         sink.put(") TIMESTAMP(ts) PARTITION BY DAY");
-        try (OperationFuture op = compiler.compile(sink.toString(), context).execute(null)) {
-            op.await();
-        }
+        engine.execute(sink, context);
+        TableModel tableModel = new TableModel(cairoConfig, tableName, PartitionBy.DAY)
+                .col("l", ColumnType.LONG)
+                .col("s", ColumnType.SYMBOL)
+                .timestamp("ts");
         try (
-                TableModel tableModel = new TableModel(cairoConfig, tableName, PartitionBy.DAY)
-                        .col("l", ColumnType.LONG)
-                        .col("s", ColumnType.SYMBOL)
-                        .timestamp("ts");
                 OperationFuture op = compiler.compile(insertFromSelectPopulateTableStmt(tableModel, 10000, "2020-01-01", 100), context).execute(null)
         ) {
             op.await();
         }
-        return engine.getTableToken(tableName);
+        return engine.verifyTableName(tableName);
     }
 
     static {

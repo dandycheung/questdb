@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,8 +26,9 @@ package io.questdb.griffin.model;
 
 import io.questdb.std.Mutable;
 import io.questdb.std.ObjectFactory;
-import io.questdb.std.Sinkable;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
 
 public class CopyModel implements ExecutionModel, Mutable, Sinkable {
     public static final ObjectFactory<CopyModel> FACTORY = CopyModel::new;
@@ -78,7 +79,13 @@ public class CopyModel implements ExecutionModel, Mutable, Sinkable {
         return partitionBy;
     }
 
-    public ExpressionNode getTarget() {
+    @Override
+    public CharSequence getTableName() {
+        return target.token;
+    }
+
+    @Override
+    public ExpressionNode getTableNameExpr() {
         return target;
     }
 
@@ -135,6 +142,6 @@ public class CopyModel implements ExecutionModel, Mutable, Sinkable {
     }
 
     @Override
-    public void toSink(CharSink sink) {
+    public void toSink(@NotNull CharSink<?> sink) {
     }
 }

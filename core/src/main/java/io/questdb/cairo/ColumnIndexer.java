@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,17 +25,14 @@
 package io.questdb.cairo;
 
 import io.questdb.cairo.vm.api.MemoryMA;
-import io.questdb.cairo.vm.api.MemoryR;
+import io.questdb.std.FilesFacade;
 import io.questdb.std.QuietCloseable;
 import io.questdb.std.str.Path;
 
 
 public interface ColumnIndexer extends QuietCloseable {
 
-    void closeSlider();
-
     void configureFollowerAndWriter(
-            CairoConfiguration configuration,
             Path path,
             CharSequence name,
             long columnNameTxn,
@@ -43,23 +40,27 @@ public interface ColumnIndexer extends QuietCloseable {
             long columnTop
     );
 
-    void configureWriter(CairoConfiguration configuration, Path path, CharSequence name, long columnNameTxn, long columnTop);
+    void configureWriter(Path path, CharSequence name, long columnNameTxn, long columnTop);
 
     void distress();
 
-    int getFd();
+    long getFd();
 
     long getSequence();
 
     BitmapIndexWriter getWriter();
 
-    void index(MemoryR mem, long loRow, long hiRow);
+    void index(FilesFacade ff, long dataColumnFd, long loRow, long hiRow);
 
     boolean isDistressed();
 
     void refreshSourceAndIndex(long loRow, long hiRow);
 
+    void releaseIndexWriter();
+
     void rollback(long maxRow);
+
+    void sync(boolean async);
 
     boolean tryLock(long expectedSequence);
 }

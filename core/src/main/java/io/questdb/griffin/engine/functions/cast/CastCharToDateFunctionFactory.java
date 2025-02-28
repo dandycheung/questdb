@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -45,21 +45,14 @@ public class CastCharToDateFunctionFactory implements FunctionFactory {
     }
 
     public static class CastCharToDateFunction extends AbstractCastToDateFunction {
-        private final Function arg;
-
         public CastCharToDateFunction(Function arg) {
-            this.arg = arg;
-        }
-
-        @Override
-        public Function getArg() {
-            return arg;
+            super(arg);
         }
 
         @Override
         public long getDate(Record rec) {
             final byte v = (byte) (arg.getChar(rec) - '0');
-            return v > -1 && v < 10 ? v : Numbers.LONG_NaN;
+            return v > -1 && v < 10 ? v : Numbers.LONG_NULL;
         }
     }
 }

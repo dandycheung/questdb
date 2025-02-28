@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,32 +25,37 @@
 package io.questdb.test.cairo;
 
 import io.questdb.cairo.CairoException;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.GenericRecordMetadata;
+import io.questdb.cairo.TableColumnMetadata;
 import io.questdb.cairo.TableUtils;
-import io.questdb.std.*;
+import io.questdb.std.Files;
+import io.questdb.std.FilesFacade;
+import io.questdb.std.MemoryTag;
+import io.questdb.std.Misc;
+import io.questdb.std.Os;
+import io.questdb.std.Unsafe;
 import io.questdb.std.str.Path;
+import io.questdb.test.AbstractTest;
 import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.test.tools.TestUtils;
-import org.junit.*;
-import org.junit.rules.TemporaryFolder;
-import org.junit.rules.TestName;
+import org.junit.After;
+import org.junit.Assert;
+import org.junit.Assume;
+import org.junit.Before;
+import org.junit.Test;
 
 import java.io.File;
-import java.io.IOException;
 
 import static io.questdb.cairo.TableUtils.TABLE_RESERVED;
 
-public class TableUtilsTest {
+public class TableUtilsTest extends AbstractTest {
     private final static FilesFacade FF = TestFilesFacadeImpl.INSTANCE;
-    @ClassRule
-    public static TemporaryFolder temp = new TemporaryFolder();
-
-    @Rule
-    public final TestName testName = new TestName();
 
     private Path path;
 
     @Before
-    public void setUp() throws IOException {
+    public void setUp() {
         path = new Path();
     }
 
@@ -68,7 +73,7 @@ public class TableUtilsTest {
         path.of(volumeRoot.getAbsolutePath()).concat(tableName).$();
         Assert.assertTrue(new File(dbRoot, tableName).mkdir());
         try {
-            TableUtils.createTableInVolume(
+            TableUtils.createTableOrMatViewInVolume(
                     FF,
                     dbRoot.getAbsolutePath(),
                     509,
@@ -77,14 +82,15 @@ public class TableUtilsTest {
                     tableName,
                     null,
                     0,
-                    0);
+                    0
+            );
             Assert.fail();
         } catch (CairoException e) {
             path.of(dbRoot.getAbsolutePath()).concat(tableName).$();
             TestUtils.assertContains(e.getFlyweightMessage(), "table directory already exists [path=" + path.toString() + ']');
         } finally {
-            dbRoot.delete();
-            volumeRoot.delete();
+            TestUtils.removeTestPath(dbRoot.getAbsolutePath());
+            TestUtils.removeTestPath(volumeRoot.getAbsolutePath());
         }
     }
 
@@ -97,7 +103,7 @@ public class TableUtilsTest {
         path.of(volumeRoot.getAbsolutePath()).concat(tableName).$();
         Assert.assertTrue(new File(volumeRoot, tableName).mkdir());
         try {
-            TableUtils.createTableInVolume(
+            TableUtils.createTableOrMatViewInVolume(
                     FF,
                     dbRoot.getAbsolutePath(),
                     509,
@@ -106,7 +112,8 @@ public class TableUtilsTest {
                     tableName,
                     null,
                     0,
-                    0);
+                    0
+            );
             Assert.fail();
         } catch (CairoException e) {
             TestUtils.assertContains(e.getFlyweightMessage(), "table directory already exists in volume [path=" + path.toString() + ']');
@@ -125,7 +132,7 @@ public class TableUtilsTest {
         path.of(volumeRoot.getAbsolutePath()).concat(tableName).$();
         Assert.assertTrue(new File(dbRoot, tableName).createNewFile());
         try {
-            TableUtils.createTableInVolume(
+            TableUtils.createTableOrMatViewInVolume(
                     FF,
                     dbRoot.getAbsolutePath(),
                     509,
@@ -134,15 +141,25 @@ public class TableUtilsTest {
                     tableName,
                     null,
                     0,
-                    0);
+                    0
+            );
             Assert.fail();
         } catch (CairoException e) {
             TestUtils.assertContains(e.getFlyweightMessage(), "could not create soft link [src=" + path.toString() + ", tableDir=" + tableName + ']');
-            Assert.assertFalse(Files.exists(path));
+            Assert.assertFalse(Files.exists(path.$()));
         } finally {
             dbRoot.delete();
             volumeRoot.delete();
         }
+    }
+
+    @Test
+    public void testEstimateRecordSize() {
+        GenericRecordMetadata metadata = new GenericRecordMetadata();
+        metadata.add(new TableColumnMetadata("a", ColumnType.INT, metadata))
+                .add(new TableColumnMetadata("b", ColumnType.STRING, metadata))
+                .add(new TableColumnMetadata("c", -ColumnType.DOUBLE, metadata));
+        Assert.assertEquals(4 + 28, TableUtils.estimateAvgRecordSize(metadata));
     }
 
     @Test
@@ -214,6 +231,38 @@ public class TableUtilsTest {
 
         Assert.assertFalse(TableUtils.isValidTableName("abc", 2));
         Assert.assertTrue(TableUtils.isValidTableName("الْعَرَبِيَّة", 127));
+    }
+
+    @Test
+    public void testNullValue() {
+        long mem1 = Unsafe.malloc(32, MemoryTag.NATIVE_DEFAULT);
+        long mem2 = Unsafe.malloc(32, MemoryTag.NATIVE_DEFAULT);
+        try {
+            for (int columnType = 0; columnType < ColumnType.NULL; columnType++) {
+                if (!ColumnType.isVarSize(columnType)) {
+                    int size = ColumnType.sizeOf(columnType);
+                    if (size > 0) {
+                        TableUtils.setNull(columnType, mem2, 1);
+                        Unsafe.getUnsafe().putLong(mem1, TableUtils.getNullLong(columnType, 0));
+                        Unsafe.getUnsafe().putLong(mem1 + 8, TableUtils.getNullLong(columnType, 1));
+                        Unsafe.getUnsafe().putLong(mem1 + 16, TableUtils.getNullLong(columnType, 2));
+                        Unsafe.getUnsafe().putLong(mem1 + 24, TableUtils.getNullLong(columnType, 3));
+
+                        String type = ColumnType.nameOf(columnType);
+                        for (int b = 0; b < size; b++) {
+                            Assert.assertEquals(
+                                    type,
+                                    Unsafe.getUnsafe().getByte(mem1 + b),
+                                    Unsafe.getUnsafe().getByte(mem1 + b)
+                            );
+                        }
+                    }
+                }
+            }
+        } finally {
+            Unsafe.free(mem1, 32, MemoryTag.NATIVE_DEFAULT);
+            Unsafe.free(mem2, 32, MemoryTag.NATIVE_DEFAULT);
+        }
     }
 
     private void testIsValidColumnName(char c, boolean expected) {

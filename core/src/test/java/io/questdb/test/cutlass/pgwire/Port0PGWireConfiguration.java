@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,24 +25,49 @@
 package io.questdb.test.cutlass.pgwire;
 
 import io.questdb.cutlass.pgwire.DefaultPGWireConfiguration;
-import io.questdb.network.DefaultIODispatcherConfiguration;
-import io.questdb.network.IODispatcherConfiguration;
+import io.questdb.std.Rnd;
+
 
 public class Port0PGWireConfiguration extends DefaultPGWireConfiguration {
-    private final DefaultIODispatcherConfiguration ioDispatcherConfiguration = new DefaultIODispatcherConfiguration() {
-        @Override
-        public int getBindPort() {
-            return 0;  // Bind to ANY port.
-        }
+    private static final String DEBUG_PGWIRE_PORT = "QDB_DEBUG_PGWIRE_PORT";
+    int connectionLimit;
+    boolean isLegacyMode;
 
-        @Override
-        public String getDispatcherLogName() {
-            return "pg-server";
-        }
-    };
+    public Port0PGWireConfiguration() {
+        this(-1, false);
+    }
+
+    public Port0PGWireConfiguration(int connectionLimit, boolean isLegacyMode) {
+        this.isLegacyMode = isLegacyMode;
+        this.connectionLimit = connectionLimit;
+    }
+
+    public static int getPGWirePort() {
+        final String debugPort = System.getenv().get(DEBUG_PGWIRE_PORT);
+        // When QDB_DEBUG_PGWIRE_PORT is not set, bind to ANY port.
+        return debugPort != null ? Integer.parseInt(debugPort) : 0;
+    }
 
     @Override
-    public IODispatcherConfiguration getDispatcherConfiguration() {
-        return ioDispatcherConfiguration;
+    public int getBindPort() {
+        return getPGWirePort();
+    }
+
+    @Override
+    public int getLimit() {
+        if (connectionLimit > -1) {
+            return connectionLimit;
+        }
+        return super.getLimit();
+    }
+
+    @Override
+    public Rnd getRandom() {
+        return new Rnd();
+    }
+
+    @Override
+    public boolean isLegacyModeEnabled() {
+        return isLegacyMode;
     }
 }

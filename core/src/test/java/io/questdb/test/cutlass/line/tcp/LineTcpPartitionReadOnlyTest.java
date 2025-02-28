@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,13 +24,9 @@
 
 package io.questdb.test.cutlass.line.tcp;
 
-import io.questdb.Bootstrap;
 import io.questdb.ServerMain;
 import io.questdb.cairo.*;
 import io.questdb.cairo.pool.PoolListener;
-import io.questdb.cairo.vm.Vm;
-import io.questdb.cairo.vm.api.MemoryMARW;
-import io.questdb.test.cutlass.line.AbstractLinePartitionReadOnlyTest;
 import io.questdb.cutlass.line.LineTcpSender;
 import io.questdb.griffin.SqlCompiler;
 import io.questdb.griffin.SqlExecutionContext;
@@ -38,16 +34,29 @@ import io.questdb.mp.SOCountDownLatch;
 import io.questdb.network.Net;
 import io.questdb.std.Chars;
 import io.questdb.std.Misc;
-import io.questdb.std.str.Path;
 import io.questdb.test.cairo.TableModel;
+import io.questdb.test.cutlass.line.AbstractLinePartitionReadOnlyTest;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
+import org.junit.Before;
 import org.junit.Test;
 
-import static io.questdb.cairo.TableUtils.createTable;
+import java.time.temporal.ChronoUnit;
+
 import static io.questdb.test.tools.TestUtils.*;
 
 public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyTest {
+
+    @Before
+    public void setUp() {
+        super.setUp();
+        TestUtils.unchecked(() -> createDummyConfiguration(
+                        "cairo.max.uncommitted.rows=500",
+                        "cairo.commit.lag=2000",
+                        "cairo.o3.max.lag=2000"
+                )
+        );
+    }
 
     @Test
     public void testActivePartitionReadOnlyAndNoO3() throws Exception {
@@ -65,7 +74,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                                     .tag("s", "lobster")
                                     .field("l", 88)
                                     .field("i", 2124)
-                                    .at(timestampNano[tickerId]);
+                                    .at(timestampNano[tickerId], ChronoUnit.NANOS);
                         }
                         sender.flush();
                     } finally {
@@ -94,7 +103,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                                     .tag("s", "lobster")
                                     .field("l", 88)
                                     .field("i", 2124)
-                                    .at(timestampNano[tickerId]);
+                                    .at(timestampNano[tickerId], ChronoUnit.NANOS);
                         }
                         sender.flush();
                     } finally {
@@ -128,7 +137,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                                     .tag("s", "lobster")
                                     .field("l", 88)
                                     .field("i", 2124)
-                                    .at(timestampNano[tickerId]);
+                                    .at(timestampNano[tickerId], ChronoUnit.NANOS);
                         }
                         sender.flush();
                     } finally {
@@ -161,7 +170,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                                     .tag("s", "lobster")
                                     .field("l", 88)
                                     .field("i", 2124)
-                                    .at(timestampNano[tickerId]);
+                                    .at(timestampNano[tickerId], ChronoUnit.NANOS);
                         }
                         sender.flush();
                     } finally {
@@ -183,36 +192,27 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
     ) throws Exception {
         assertMemoryLeak(() -> {
             try (
-                    ServerMain qdb = new ServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION);
-                    SqlCompiler compiler = new SqlCompiler(qdb.getCairoEngine());
-                    SqlExecutionContext context = TestUtils.createSqlExecutionCtx(qdb.getCairoEngine())
+                    ServerMain qdb = new ServerMain(getServerMainArgs());
+                    SqlCompiler compiler = qdb.getEngine().getSqlCompiler();
+                    SqlExecutionContext context = TestUtils.createSqlExecutionCtx(qdb.getEngine())
             ) {
                 qdb.start();
-                CairoEngine engine = qdb.getCairoEngine();
+                CairoEngine engine = qdb.getEngine();
 
                 // create a table with 4 partitions and 1111 rows
                 CairoConfiguration cairoConfig = qdb.getConfiguration().getCairoConfiguration();
 
-                TableToken tableToken;
-                try (
-                        TableModel tableModel = new TableModel(cairoConfig, tableName, PartitionBy.DAY)
-                                .col("l", ColumnType.LONG)
-                                .col("i", ColumnType.INT)
-                                .col("s", ColumnType.SYMBOL).symbolCapacity(32)
-                                .timestamp("ts");
-                        MemoryMARW mem = Vm.getMARWInstance();
-                        Path path = new Path().of(cairoConfig.getRoot())
-                ) {
-                    tableToken = engine.lockTableName(tableName, 1, false);
-                    Assert.assertNotNull(tableToken);
-                    engine.registerTableToken(tableToken);
-                    createTable(cairoConfig, mem, path.concat(tableToken), tableModel, 1, tableToken.getDirName());
-                    compiler.compile(insertFromSelectPopulateTableStmt(tableModel, 1111, firstPartitionName, 4), context);
-                    engine.unlockTableName(tableToken);
-                }
-                Assert.assertNotNull(tableToken);
+                TableModel tableModel = new TableModel(cairoConfig, tableName, PartitionBy.DAY)
+                        .col("l", ColumnType.LONG)
+                        .col("i", ColumnType.INT)
+                        .col("s", ColumnType.SYMBOL).symbolCapacity(32)
+                        .timestamp("ts");
+                engine.execute("create table " + tableName + " (l long, i int, s symbol, ts timestamp) timestamp(ts) partition by day bypass wal", context);
+                CharSequence insertSql = insertFromSelectPopulateTableStmt(tableModel, 1111, firstPartitionName, 4);
+                engine.execute(insertSql, context);
 
                 // set partition read-only state
+                TableToken tableToken = engine.getTableTokenIfExists(tableName);
                 try (TableWriter writer = getWriter(engine, tableToken)) {
                     TxWriter txWriter = writer.getTxWriter();
                     int partitionCount = txWriter.getPartitionCount();
@@ -221,7 +221,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                         txWriter.setPartitionReadOnly(i, partitionIsReadOnly[i]);
                     }
                     txWriter.bumpTruncateVersion();
-                    txWriter.commit(CommitMode.NOSYNC, writer.getDenseSymbolMapWriters()); // default commit mode
+                    txWriter.commit(writer.getDenseSymbolMapWriters()); // default commit mode
                 }
 
                 // check read only state
@@ -231,7 +231,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                         compiler,
                         context,
                         "SELECT min(ts), max(ts), count() FROM " + tableName + " SAMPLE BY 1d ALIGN TO CALENDAR",
-                        Misc.getThreadLocalBuilder(),
+                        Misc.getThreadLocalSink(),
                         TABLE_START_CONTENT);
 
                 // so that we know when the table writer is returned to the pool
@@ -257,7 +257,7 @@ public class LineTcpPartitionReadOnlyTest extends AbstractLinePartitionReadOnlyT
                         compiler,
                         context,
                         "SELECT min(ts), max(ts), count() FROM " + tableName + " SAMPLE BY 1d ALIGN TO CALENDAR",
-                        Misc.getThreadLocalBuilder(),
+                        Misc.getThreadLocalSink(),
                         finallyExpected);
             }
         });

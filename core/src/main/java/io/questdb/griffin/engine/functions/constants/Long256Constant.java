@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,19 +31,39 @@ import io.questdb.std.Long256;
 import io.questdb.std.Long256Impl;
 import io.questdb.std.str.CharSink;
 
-public class Long256Constant extends Long256Function implements ConstantFunction {
-    private final Long256Impl value = new Long256Impl();
+public class Long256Constant extends Long256Function implements Long256, ConstantFunction {
+    protected Long256Impl value;
+
+    Long256Constant() {
+        // used by Long256NullConstant
+    }
 
     public Long256Constant(Long256 that) {
         this(that.getLong0(), that.getLong1(), that.getLong2(), that.getLong3());
     }
 
     public Long256Constant(long l0, long l1, long l2, long l3) {
+        value = new Long256Impl();
         value.setAll(l0, l1, l2, l3);
     }
 
     @Override
-    public void getLong256(Record rec, CharSink sink) {
+    public long getLong0() {
+        return value.getLong0();
+    }
+
+    @Override
+    public long getLong1() {
+        return value.getLong1();
+    }
+
+    @Override
+    public long getLong2() {
+        return value.getLong2();
+    }
+
+    @Override
+    public void getLong256(Record rec, CharSink<?> sink) {
         value.toSink(sink);
     }
 
@@ -55,6 +75,21 @@ public class Long256Constant extends Long256Function implements ConstantFunction
     @Override
     public Long256 getLong256B(Record rec) {
         return value;
+    }
+
+    @Override
+    public long getLong3() {
+        return value.getLong3();
+    }
+
+    @Override
+    public boolean isNullConstant() {
+        return Long256Impl.NULL_LONG256.equals(value);
+    }
+
+    @Override
+    public void setAll(long l0, long l1, long l2, long l3) {
+        throw new UnsupportedOperationException();
     }
 
     @Override

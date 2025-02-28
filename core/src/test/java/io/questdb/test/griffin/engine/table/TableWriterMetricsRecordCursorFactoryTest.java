@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,13 +25,16 @@
 package io.questdb.test.griffin.engine.table;
 
 import io.questdb.Metrics;
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableWriterMetrics;
 import io.questdb.cairo.sql.RecordCursor;
-import io.questdb.griffin.engine.table.TableWriterMetricsRecordCursorFactory;
-import io.questdb.test.AbstractGriffinTest;
 import io.questdb.griffin.SqlCompiler;
 import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.griffin.engine.table.TableWriterMetricsRecordCursorFactory;
 import io.questdb.std.str.StringSink;
+import io.questdb.test.AbstractCairoTest;
 import io.questdb.test.cairo.TableModel;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Test;
@@ -41,7 +44,7 @@ import java.util.Objects;
 import static org.junit.Assert.assertNotEquals;
 import static org.junit.Assert.assertTrue;
 
-public class TableWriterMetricsRecordCursorFactoryTest extends AbstractGriffinTest {
+public class TableWriterMetricsRecordCursorFactoryTest extends AbstractCairoTest {
 
     @Test
     public void testCursor() {
@@ -61,10 +64,11 @@ public class TableWriterMetricsRecordCursorFactoryTest extends AbstractGriffinTe
 
     @Test
     public void testDisabled() throws Exception {
+        Metrics.ENABLED.disable();
         assertMemoryLeak(() -> {
             try (
-                    CairoEngine localEngine = new CairoEngine(configuration, Metrics.disabled());
-                    SqlCompiler localCompiler = new SqlCompiler(localEngine, null, snapshotAgent);
+                    CairoEngine localEngine = new CairoEngine(configuration);
+                    SqlCompiler localCompiler = localEngine.getSqlCompiler();
                     SqlExecutionContext localSqlExecutionContext = TestUtils.createSqlExecutionCtx(localEngine)
             ) {
                 MetricsSnapshot metricsWhenDisabled = new MetricsSnapshot(-1, -1, -1, -1, -1);
@@ -78,10 +82,9 @@ public class TableWriterMetricsRecordCursorFactoryTest extends AbstractGriffinTe
         MetricsSnapshot metricsBefore = snapshotMetrics();
         assertMetricsCursorEquals(metricsBefore);
 
-        try (TableModel tm = new TableModel(configuration, "tab1", PartitionBy.NONE)) {
-            tm.timestamp("ts").col("ID", ColumnType.INT);
-            createPopulateTable(tm, 1, "2020-01-01", 1);
-        }
+        TableModel tm = new TableModel(configuration, "tab1", PartitionBy.NONE);
+        tm.timestamp("ts").col("ID", ColumnType.INT);
+        createPopulateTable(tm, 1, "2020-01-01", 1);
         MetricsSnapshot metricsAfter = snapshotMetrics();
         assertNotEquals(metricsBefore, metricsAfter);
 
@@ -112,7 +115,6 @@ public class TableWriterMetricsRecordCursorFactoryTest extends AbstractGriffinTe
     @Test
     public void testSanity() {
         // we want to make sure metrics in tests are enabled by default
-        assertTrue(metrics.isEnabled());
         assertTrue(engine.getMetrics().isEnabled());
 
         MetricsSnapshot metricsSnapshot = snapshotMetrics();
@@ -125,7 +127,7 @@ public class TableWriterMetricsRecordCursorFactoryTest extends AbstractGriffinTe
     }
 
     private static MetricsSnapshot snapshotMetrics() {
-        TableWriterMetrics writerMetrics = engine.getMetrics().tableWriter();
+        TableWriterMetrics writerMetrics = engine.getMetrics().tableWriterMetrics();
         return new MetricsSnapshot(writerMetrics.getCommitCount(),
                 writerMetrics.getCommittedRows(),
                 writerMetrics.getO3CommitCount(),

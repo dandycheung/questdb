@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 package io.questdb.griffin.engine.union;
 
+import io.questdb.cairo.DataUnavailableException;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.*;
 import io.questdb.griffin.SqlException;
@@ -45,6 +46,12 @@ class UnionAllRecordCursor extends AbstractSetRecordCursor implements NoRandomAc
     }
 
     @Override
+    public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, RecordCursor.Counter counter) {
+        cursorA.calculateSize(circuitBreaker, counter);
+        cursorB.calculateSize(circuitBreaker, counter);
+    }
+
+    @Override
     public Record getRecord() {
         return record;
     }
@@ -62,6 +69,16 @@ class UnionAllRecordCursor extends AbstractSetRecordCursor implements NoRandomAc
             return -1;
         }
         return sizeA + sizeB;
+    }
+
+    @Override
+    public void skipRows(Counter rowCount) throws DataUnavailableException {
+        cursorA.skipRows(rowCount);
+        if (rowCount.get() > 0) {
+            cursorB.skipRows(rowCount);
+            record.setAb(false);
+            nextMethod = nextB;
+        }
     }
 
     @Override

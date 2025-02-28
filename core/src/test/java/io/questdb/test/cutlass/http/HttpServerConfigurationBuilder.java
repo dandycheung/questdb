@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -23,49 +23,51 @@
  ******************************************************************************/
 package io.questdb.test.cutlass.http;
 
-import io.questdb.cutlass.http.*;
+import io.questdb.DefaultFactoryProvider;
+import io.questdb.FactoryProvider;
+import io.questdb.cairo.SecurityContext;
+import io.questdb.cutlass.http.DefaultHttpContextConfiguration;
+import io.questdb.cutlass.http.DefaultHttpServerConfiguration;
+import io.questdb.cutlass.http.HttpContextConfiguration;
+import io.questdb.cutlass.http.MimeTypesCache;
+import io.questdb.cutlass.http.WaitProcessorConfiguration;
 import io.questdb.cutlass.http.processors.JsonQueryProcessorConfiguration;
 import io.questdb.cutlass.http.processors.StaticContentProcessorConfiguration;
-import io.questdb.network.DefaultIODispatcherConfiguration;
-import io.questdb.network.IODispatcherConfiguration;
 import io.questdb.network.NetworkFacade;
 import io.questdb.network.NetworkFacadeImpl;
 import io.questdb.std.FilesFacade;
+import io.questdb.std.NanosecondClock;
 import io.questdb.std.Numbers;
 import io.questdb.std.StationaryMillisClock;
-import io.questdb.test.std.TestFilesFacadeImpl;
+import io.questdb.std.StationaryNanosClock;
 import io.questdb.std.datetime.millitime.MillisecondClock;
 import io.questdb.std.datetime.millitime.MillisecondClockImpl;
+import io.questdb.test.std.TestFilesFacadeImpl;
 
 public class HttpServerConfigurationBuilder {
     private boolean allowDeflateBeforeSend;
     private String baseDir;
     private long configuredMaxQueryResponseRowLimit = Long.MAX_VALUE;
     private boolean dumpTraffic;
+    private FactoryProvider factoryProvider;
+    private byte httpHealthCheckAuthType = SecurityContext.AUTH_TYPE_NONE;
     private String httpProtocolVersion = "HTTP/1.1 ";
+    private byte httpStaticContentAuthType = SecurityContext.AUTH_TYPE_NONE;
     private long multipartIdleSpinCount = -1;
+    private NanosecondClock nanosecondClock = StationaryNanosClock.INSTANCE;
     private NetworkFacade nf = NetworkFacadeImpl.INSTANCE;
+    private boolean pessimisticHealthCheck = false;
+    private int port = -1;
     private int receiveBufferSize = 1024 * 1024;
     private int rerunProcessingQueueSize = 4096;
     private int sendBufferSize = 1024 * 1024;
     private boolean serverKeepAlive = true;
+    private int tcpSndBufSize;
+    private int workerCount;
 
     public DefaultHttpServerConfiguration build() {
-        final IODispatcherConfiguration ioDispatcherConfiguration = new DefaultIODispatcherConfiguration() {
-            @Override
-            public NetworkFacade getNetworkFacade() {
-                return nf;
-            }
-        };
-
         return new DefaultHttpServerConfiguration() {
             private final JsonQueryProcessorConfiguration jsonQueryProcessorConfiguration = new JsonQueryProcessorConfiguration() {
-
-                @Override
-                public MillisecondClock getClock() {
-                    return () -> 0;
-                }
-
                 @Override
                 public int getConnectionCheckFrequency() {
                     return 1_000_000;
@@ -73,7 +75,12 @@ public class HttpServerConfigurationBuilder {
 
                 @Override
                 public int getDoubleScale() {
-                    return Numbers.MAX_SCALE;
+                    return Numbers.MAX_DOUBLE_SCALE;
+                }
+
+                @Override
+                public FactoryProvider getFactoryProvider() {
+                    return DefaultFactoryProvider.INSTANCE;
                 }
 
                 @Override
@@ -83,7 +90,7 @@ public class HttpServerConfigurationBuilder {
 
                 @Override
                 public int getFloatScale() {
-                    return 10;
+                    return Numbers.MAX_FLOAT_SCALE;
                 }
 
                 @Override
@@ -95,16 +102,21 @@ public class HttpServerConfigurationBuilder {
                 public long getMaxQueryResponseRowLimit() {
                     return configuredMaxQueryResponseRowLimit;
                 }
+
+                @Override
+                public MillisecondClock getMillisecondClock() {
+                    return StationaryMillisClock.INSTANCE;
+                }
+
+                @Override
+                public NanosecondClock getNanosecondClock() {
+                    return nanosecondClock;
+                }
             };
             private final StaticContentProcessorConfiguration staticContentProcessorConfiguration = new StaticContentProcessorConfiguration() {
                 @Override
                 public FilesFacade getFilesFacade() {
                     return TestFilesFacadeImpl.INSTANCE;
-                }
-
-                @Override
-                public CharSequence getIndexFileName() {
-                    return null;
                 }
 
                 @Override
@@ -121,11 +133,16 @@ public class HttpServerConfigurationBuilder {
                 public CharSequence getPublicDirectory() {
                     return baseDir;
                 }
+
+                @Override
+                public byte getRequiredAuthType() {
+                    return httpStaticContentAuthType;
+                }
             };
 
             @Override
-            public IODispatcherConfiguration getDispatcherConfiguration() {
-                return ioDispatcherConfiguration;
+            public int getBindPort() {
+                return port != -1 ? port : super.getBindPort();
             }
 
             @Override
@@ -137,18 +154,23 @@ public class HttpServerConfigurationBuilder {
                     }
 
                     @Override
-                    public MillisecondClock getClock() {
-                        return StationaryMillisClock.INSTANCE;
-                    }
-
-                    @Override
                     public boolean getDumpNetworkTraffic() {
                         return dumpTraffic;
                     }
 
                     @Override
+                    public FactoryProvider getFactoryProvider() {
+                        return factoryProvider != null ? factoryProvider : super.getFactoryProvider();
+                    }
+
+                    @Override
                     public String getHttpVersion() {
                         return httpProtocolVersion;
+                    }
+
+                    @Override
+                    public MillisecondClock getMillisecondClock() {
+                        return StationaryMillisClock.INSTANCE;
                     }
 
                     @Override
@@ -158,18 +180,13 @@ public class HttpServerConfigurationBuilder {
                     }
 
                     @Override
+                    public NanosecondClock getNanosecondClock() {
+                        return nanosecondClock;
+                    }
+
+                    @Override
                     public NetworkFacade getNetworkFacade() {
                         return nf;
-                    }
-
-                    @Override
-                    public int getRecvBufferSize() {
-                        return receiveBufferSize;
-                    }
-
-                    @Override
-                    public int getSendBufferSize() {
-                        return sendBufferSize;
                     }
 
                     @Override
@@ -182,6 +199,31 @@ public class HttpServerConfigurationBuilder {
             @Override
             public JsonQueryProcessorConfiguration getJsonQueryProcessorConfiguration() {
                 return jsonQueryProcessorConfiguration;
+            }
+
+            @Override
+            public int getNetSendBufferSize() {
+                return tcpSndBufSize == 0 ? super.getSendBufferSize() : tcpSndBufSize;
+            }
+
+            @Override
+            public NetworkFacade getNetworkFacade() {
+                return nf;
+            }
+
+            @Override
+            public int getRecvBufferSize() {
+                return receiveBufferSize;
+            }
+
+            @Override
+            public byte getRequiredAuthType() {
+                return httpHealthCheckAuthType;
+            }
+
+            @Override
+            public int getSendBufferSize() {
+                return sendBufferSize == 0 ? super.getSendBufferSize() : sendBufferSize;
             }
 
             @Override
@@ -218,6 +260,16 @@ public class HttpServerConfigurationBuilder {
                     }
                 };
             }
+
+            @Override
+            public int getWorkerCount() {
+                return workerCount == 0 ? super.getWorkerCount() : workerCount;
+            }
+
+            @Override
+            public boolean isPessimisticHealthCheckEnabled() {
+                return pessimisticHealthCheck;
+            }
         };
     }
 
@@ -241,6 +293,16 @@ public class HttpServerConfigurationBuilder {
         return this;
     }
 
+    public HttpServerConfigurationBuilder withFactoryProvider(FactoryProvider factoryProvider) {
+        this.factoryProvider = factoryProvider;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withHealthCheckAuthRequired(byte httpHealthCheckAuthType) {
+        this.httpHealthCheckAuthType = httpHealthCheckAuthType;
+        return this;
+    }
+
     public HttpServerConfigurationBuilder withHttpProtocolVersion(String httpProtocolVersion) {
         this.httpProtocolVersion = httpProtocolVersion;
         return this;
@@ -251,8 +313,23 @@ public class HttpServerConfigurationBuilder {
         return this;
     }
 
+    public HttpServerConfigurationBuilder withNanosClock(NanosecondClock nanosecondClock) {
+        this.nanosecondClock = nanosecondClock;
+        return this;
+    }
+
     public HttpServerConfigurationBuilder withNetwork(NetworkFacade nf) {
         this.nf = nf;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withPessimisticHealthCheck(boolean pessimisticHealthCheck) {
+        this.pessimisticHealthCheck = pessimisticHealthCheck;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withPort(int port) {
+        this.port = port;
         return this;
     }
 
@@ -273,6 +350,21 @@ public class HttpServerConfigurationBuilder {
 
     public HttpServerConfigurationBuilder withServerKeepAlive(boolean serverKeepAlive) {
         this.serverKeepAlive = serverKeepAlive;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withStaticContentAuthRequired(byte httpStaticContentAuthType) {
+        this.httpStaticContentAuthType = httpStaticContentAuthType;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withTcpSndBufSize(int tcpSndBufSize) {
+        this.tcpSndBufSize = tcpSndBufSize;
+        return this;
+    }
+
+    public HttpServerConfigurationBuilder withWorkerCount(int workerCount) {
+        this.workerCount = workerCount;
         return this;
     }
 }

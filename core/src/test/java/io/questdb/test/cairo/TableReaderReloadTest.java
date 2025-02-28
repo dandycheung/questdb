@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -41,57 +41,66 @@ import org.junit.Test;
 
 import static io.questdb.test.cairo.TableReaderTest.assertOpenPartitionCount;
 
-
 public class TableReaderReloadTest extends AbstractCairoTest {
 
     @Test
     public void testReloadTruncateByDay() {
-        testReloadAfterTruncate(PartitionBy.DAY, 3000000000L);
+        testReloadAfterTruncate(PartitionBy.DAY, 3000000000L, false);
     }
 
     @Test
     public void testReloadTruncateByMonth() {
-        testReloadAfterTruncate(PartitionBy.MONTH, 50000000000L);
+        testReloadAfterTruncate(PartitionBy.MONTH, 50000000000L, false);
     }
 
     @Test
     public void testReloadTruncateByNone() {
-        testReloadAfterTruncate(PartitionBy.NONE, 1000000);
+        testReloadAfterTruncate(PartitionBy.NONE, 1000000, false);
     }
 
     @Test
     public void testReloadTruncateByWeek() {
-        testReloadAfterTruncate(PartitionBy.WEEK, 7 * 3000000000L);
+        testReloadAfterTruncate(PartitionBy.WEEK, 7 * 3000000000L, false);
     }
 
     @Test
     public void testReloadTruncateByYear() {
-        testReloadAfterTruncate(PartitionBy.YEAR, 365 * 50000000000L);
+        testReloadAfterTruncate(PartitionBy.YEAR, 365 * 50000000000L, false);
+    }
+
+    @Test
+    public void testReloadTruncateKeepSymbolTables() {
+        testReloadAfterTruncate(PartitionBy.DAY, 3000000000L, true);
     }
 
     @Test
     public void testTruncateInsertReloadDay() {
-        testTruncateInsertReload(PartitionBy.DAY, 3000000000L);
+        testTruncateInsertReload(PartitionBy.DAY, 3000000000L, false);
+    }
+
+    @Test
+    public void testTruncateInsertReloadKeepSymbolTables() {
+        testTruncateInsertReload(PartitionBy.DAY, 3000000000L, true);
     }
 
     @Test
     public void testTruncateInsertReloadMonth() {
-        testTruncateInsertReload(PartitionBy.MONTH, 50000000000L);
+        testTruncateInsertReload(PartitionBy.MONTH, 50000000000L, false);
     }
 
     @Test
     public void testTruncateInsertReloadNone() {
-        testTruncateInsertReload(PartitionBy.NONE, 1000000L);
+        testTruncateInsertReload(PartitionBy.NONE, 1000000L, false);
     }
 
     @Test
     public void testTruncateInsertReloadWeek() {
-        testTruncateInsertReload(PartitionBy.WEEK, 7 * 3000000000L);
+        testTruncateInsertReload(PartitionBy.WEEK, 7 * 3000000000L, false);
     }
 
     @Test
     public void testTruncateInsertReloadYear() {
-        testTruncateInsertReload(PartitionBy.YEAR, 365 * 50000000000L);
+        testTruncateInsertReload(PartitionBy.YEAR, 365 * 50000000000L, false);
     }
 
     private void assertTable(Rnd rnd, long buffer, RecordCursor cursor, Record record) {
@@ -102,8 +111,8 @@ public class TableReaderReloadTest extends AbstractCairoTest {
             Assert.assertEquals(rnd.nextDouble(), record.getDouble(3), 0.00001);
             Assert.assertEquals(rnd.nextFloat(), record.getFloat(4), 0.00001);
             Assert.assertEquals(rnd.nextLong(), record.getLong(5));
-            TestUtils.assertEquals(rnd.nextChars(3), record.getStr(6));
-            TestUtils.assertEquals(rnd.nextChars(2), record.getSym(7));
+            TestUtils.assertEquals(rnd.nextChars(3), record.getStrA(6));
+            TestUtils.assertEquals(rnd.nextChars(2), record.getSymA(7));
             Assert.assertEquals(rnd.nextBoolean(), record.getBool(8));
 
             rnd.nextChars(buffer, 1024 / 2);
@@ -132,38 +141,43 @@ public class TableReaderReloadTest extends AbstractCairoTest {
         writer.commit();
     }
 
-    private void testReloadAfterTruncate(int partitionBy, long increment) {
+    private void testReloadAfterTruncate(int partitionBy, long increment, boolean keepSymbolTables) {
         if (Os.isWindows()) {
             return;
         }
         final Rnd rnd = new Rnd();
         final int bufferSize = 1024;
         long buffer = Unsafe.malloc(bufferSize, MemoryTag.NATIVE_DEFAULT);
-        try (TableModel model = CreateTableTestUtils.getAllTypesModel(configuration, partitionBy)) {
-            model.timestamp();
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = CreateTableTestUtils.getAllTypesModel(configuration, partitionBy);
+        model.timestamp();
+        AbstractCairoTest.create(model);
 
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "all", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
 
-            try (TableReader reader = newTableReader(configuration, "all")) {
+            try (TableReader reader = newOffPoolReader(configuration, "all")) {
                 Assert.assertFalse(reader.reload());
             }
 
             populateTable(rnd, buffer, timestamp, increment, writer);
             rnd.reset();
 
-            try (TableReader reader = newTableReader(configuration, "all")) {
-                RecordCursor cursor = reader.getCursor();
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "all");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 final Record record = cursor.getRecord();
                 assertTable(rnd, buffer, cursor, record);
                 assertOpenPartitionCount(reader);
 
-                writer.truncate();
+                if (keepSymbolTables) {
+                    writer.truncateSoft();
+                } else {
+                    writer.truncate();
+                }
                 Assert.assertTrue(reader.reload());
                 assertOpenPartitionCount(reader);
-                cursor = reader.getCursor();
+                cursor.toTop();
                 Assert.assertFalse(cursor.hasNext());
 
                 rnd.reset();
@@ -172,14 +186,14 @@ public class TableReaderReloadTest extends AbstractCairoTest {
                 assertOpenPartitionCount(reader);
 
                 rnd.reset();
-                cursor = reader.getCursor();
+                cursor.toTop();
                 assertTable(rnd, buffer, cursor, record);
                 assertOpenPartitionCount(reader);
             }
         }
     }
 
-    private void testTruncateInsertReload(int partitionBy, long increment) {
+    private void testTruncateInsertReload(int partitionBy, long increment, boolean keepSymbolTables) {
         if (Os.isWindows()) {
             return;
         }
@@ -187,28 +201,32 @@ public class TableReaderReloadTest extends AbstractCairoTest {
         final Rnd rnd = new Rnd();
         final int bufferSize = 1024;
         long buffer = Unsafe.malloc(bufferSize, MemoryTag.NATIVE_DEFAULT);
-        try (TableModel model = CreateTableTestUtils.getAllTypesModel(configuration, partitionBy)) {
-            model.timestamp();
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = CreateTableTestUtils.getAllTypesModel(configuration, partitionBy);
+        model.timestamp();
+        AbstractCairoTest.create(model);
 
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "all", metrics)) {
-
-            try (TableReader reader = newTableReader(configuration, "all")) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
+            try (TableReader reader = newOffPoolReader(configuration, "all")) {
                 Assert.assertFalse(reader.reload());
             }
 
             populateTable(rnd, buffer, timestamp, increment, writer);
             rnd.reset();
 
-            try (TableReader reader = newTableReader(configuration, "all")) {
-                RecordCursor cursor = reader.getCursor();
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "all");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 final Record record = cursor.getRecord();
                 assertTable(rnd, buffer, cursor, record);
                 assertOpenPartitionCount(reader);
 
-                writer.truncate();
+                if (keepSymbolTables) {
+                    writer.truncateSoft();
+                } else {
+                    writer.truncate();
+                }
 
                 // Write different data
                 rnd.reset(123, 123);
@@ -218,7 +236,7 @@ public class TableReaderReloadTest extends AbstractCairoTest {
 
                 // Assert the data is what was written the second time
                 rnd.reset(123, 123);
-                cursor = reader.getCursor();
+                cursor.toTop();
                 assertTable(rnd, buffer, cursor, record);
                 assertOpenPartitionCount(reader);
             }

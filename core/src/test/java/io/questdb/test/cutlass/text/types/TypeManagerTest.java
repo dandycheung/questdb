@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -37,40 +37,33 @@ import io.questdb.std.datetime.DateLocaleFactory;
 import io.questdb.std.datetime.microtime.TimestampFormatFactory;
 import io.questdb.std.datetime.millitime.DateFormatFactory;
 import io.questdb.std.datetime.millitime.DateFormatUtils;
-import io.questdb.std.str.DirectCharSink;
+import io.questdb.std.str.DirectUtf16Sink;
+import io.questdb.std.str.DirectUtf8Sink;
+import io.questdb.test.AbstractTest;
 import io.questdb.test.tools.TestUtils;
 import org.junit.*;
-import org.junit.rules.TemporaryFolder;
 
 import java.io.File;
 import java.io.IOException;
 
-public class TypeManagerTest {
-    @ClassRule
-    public static TemporaryFolder temp = new TemporaryFolder();
+public class TypeManagerTest extends AbstractTest {
     private static JsonLexer jsonLexer;
-    private static String root;
-    private static DirectCharSink utf8Sink;
+    private static DirectUtf16Sink utf16Sink;
+    private static DirectUtf8Sink utf8Sink;
 
     @BeforeClass
-    public static void setUp() {
-        utf8Sink = new DirectCharSink(64);
+    public static void setUpStatic() throws Exception {
+        AbstractTest.setUpStatic();
+        utf16Sink = new DirectUtf16Sink(64);
+        utf8Sink = new DirectUtf8Sink(64);
         jsonLexer = new JsonLexer(1024, 2048);
     }
 
-    @BeforeClass
-    public static void setUpStatic() {
-        try {
-            root = temp.newFolder("conf").getAbsolutePath();
-        } catch (IOException e) {
-            throw new ExceptionInInitializerError();
-        }
-    }
-
     @AfterClass
-    public static void tearDown() {
-        Misc.free(utf8Sink);
+    public static void tearDownStatic() {
+        Misc.free(utf16Sink);
         Misc.free(jsonLexer);
+        AbstractTest.tearDownStatic();
     }
 
     @Before
@@ -130,16 +123,16 @@ public class TypeManagerTest {
 
     @Test
     public void testDefaultFileName() throws JsonException, IOException {
-        File configFile = temp.newFile("conf/text_loader.json");
+        File configFile = new File(root, "text_loader.json");
         TestUtils.writeStringToFile(configFile, "{\n}\n");
         TypeManager typeManager = createTypeManager("/text_loader.json");
-        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID]", typeManager.getAllAdapters().toString());
+        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID,IPv4]", typeManager.getAllAdapters().toString());
     }
 
     @Test
     public void testEmpty() throws JsonException {
         TypeManager typeManager = createTypeManager("/textloader/types/empty.json");
-        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID]", typeManager.getAllAdapters().toString());
+        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID,IPv4]", typeManager.getAllAdapters().toString());
     }
 
     @Test
@@ -153,16 +146,21 @@ public class TypeManagerTest {
     }
 
     @Test
+    public void testIllegalMethodParameterGeoInt() {
+        testIllegalParameterForGetTypeAdapter(ColumnType.GEOINT);
+    }
+
+    @Test
     public void testIllegalMethodParameterTimestamp() {
         testIllegalParameterForGetTypeAdapter(ColumnType.TIMESTAMP);
     }
 
     @Test
     public void testNonDefaultFileName() throws JsonException, IOException {
-        File configFile = temp.newFile("conf/my_awesome_text_loader.json");
+        File configFile = new File(root, "my_awesome_text_loader.json");
         TestUtils.writeStringToFile(configFile, "{\n}\n");
         TypeManager typeManager = createTypeManager("/my_awesome_text_loader.json");
-        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID]", typeManager.getAllAdapters().toString());
+        Assert.assertEquals("[CHAR,INT,LONG,DOUBLE,BOOLEAN,LONG256,UUID,IPv4]", typeManager.getAllAdapters().toString());
     }
 
     @Test
@@ -240,16 +238,16 @@ public class TypeManagerTest {
                 new DateFormatFactory(),
                 DateLocaleFactory.INSTANCE,
                 new TimestampFormatFactory(),
-                DateFormatUtils.enLocale
+                DateFormatUtils.EN_LOCALE
         );
 
         inputFormatConfiguration.parseConfiguration(getClass(), jsonLexer, root, fileResource);
-        return new TypeManager(new DefaultTextConfiguration(getClass(), root, fileResource), utf8Sink);
+        return new TypeManager(new DefaultTextConfiguration(getClass(), root, fileResource), utf16Sink, utf8Sink);
     }
 
     private void testIllegalParameterForGetTypeAdapter(int columnType) {
         TextConfiguration textConfiguration = new DefaultTextConfiguration();
-        TypeManager typeManager = new TypeManager(textConfiguration, utf8Sink);
+        TypeManager typeManager = new TypeManager(textConfiguration, utf16Sink, utf8Sink);
         try {
             typeManager.getTypeAdapter(columnType);
             Assert.fail();

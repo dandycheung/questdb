@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -33,13 +33,15 @@ import io.questdb.std.Files;
 import java.io.Closeable;
 
 public class LogConsoleWriter extends SynchronizedJob implements Closeable, LogWriter {
-    private final int fd = Files.getStdOutFd();
+    private final long fd = Files.getStdOutFdInternal();
     private final int level;
-    private final QueueConsumer<LogRecordSink> myConsumer = this::toStdOut;
-    private final RingQueue<LogRecordSink> ring;
+    private final RingQueue<LogRecordUtf8Sink> ring;
     private final SCSequence subSeq;
+    private LogInterceptor interceptor;
+    private final QueueConsumer<LogRecordUtf8Sink> myConsumer = this::toStdOut;
 
-    public LogConsoleWriter(RingQueue<LogRecordSink> ring, SCSequence subSeq, int level) {
+
+    public LogConsoleWriter(RingQueue<LogRecordUtf8Sink> ring, SCSequence subSeq, int level) {
         this.ring = ring;
         this.subSeq = subSeq;
         this.level = level;
@@ -58,9 +60,21 @@ public class LogConsoleWriter extends SynchronizedJob implements Closeable, LogW
         return subSeq.consumeAll(ring, myConsumer);
     }
 
-    private void toStdOut(LogRecordSink sink) {
+    public void setInterceptor(LogInterceptor interceptor) {
+        this.interceptor = interceptor;
+    }
+
+    private void toStdOut(LogRecordUtf8Sink sink) {
         if ((sink.getLevel() & this.level) != 0) {
-            Files.append(fd, sink.getAddress(), sink.length());
+            if (interceptor != null) {
+                interceptor.onLog(sink);
+            }
+            Files.append(fd, sink.ptr(), sink.size());
         }
+    }
+
+    @FunctionalInterface
+    public interface LogInterceptor {
+        void onLog(LogRecordUtf8Sink sink);
     }
 }

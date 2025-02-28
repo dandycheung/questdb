@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -29,23 +29,24 @@ import io.questdb.cairo.vm.MemoryCMRImpl;
 import io.questdb.cairo.vm.api.MemoryMR;
 import io.questdb.std.FilesFacade;
 import io.questdb.std.MemoryTag;
-import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.std.str.Path;
+import io.questdb.test.AbstractTest;
+import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.test.tools.TestUtils;
-import org.junit.*;
-import org.junit.rules.TemporaryFolder;
+import org.junit.AfterClass;
+import org.junit.Assert;
+import org.junit.BeforeClass;
+import org.junit.Test;
 
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.concurrent.atomic.AtomicBoolean;
 
-public class ExtendedOnePageMemoryTest {
+public class ExtendedOnePageMemoryTest extends AbstractTest {
     private static final AtomicBoolean FILE_MAP_FAIL = new AtomicBoolean(false);
     private static final int FILE_SIZE = 1024;
     private static final Path path = new Path(4096);
-    @ClassRule
-    public static TemporaryFolder temp = new TemporaryFolder();
     private static FilesFacade ff;
 
     @AfterClass
@@ -57,7 +58,7 @@ public class ExtendedOnePageMemoryTest {
     public static void beforeClass() {
         ff = new TestFilesFacadeImpl() {
             @Override
-            public long mmap(int fd, long len, long offset, int flags, int memoryTag) {
+            public long mmap(long fd, long len, long offset, int flags, int memoryTag) {
                 if (FILE_MAP_FAIL.compareAndSet(true, false)) {
                     return FilesFacade.MAP_FAILED;
                 }
@@ -65,7 +66,7 @@ public class ExtendedOnePageMemoryTest {
             }
 
             @Override
-            public long mremap(int fd, long addr, long previousSize, long newSize, long offset, int mode, int memoryTag) {
+            public long mremap(long fd, long addr, long previousSize, long newSize, long offset, int mode, int memoryTag) {
                 if (FILE_MAP_FAIL.compareAndSet(true, false)) {
                     return FilesFacade.MAP_FAILED;
                 }
@@ -79,7 +80,7 @@ public class ExtendedOnePageMemoryTest {
         createFile();
         try (MemoryMR mem = new MemoryCMRImpl()) {
             int sz = FILE_SIZE / 2;
-            mem.of(ff, path, sz, sz, MemoryTag.MMAP_DEFAULT);
+            mem.of(ff, path.$(), sz, sz, MemoryTag.MMAP_DEFAULT);
             FILE_MAP_FAIL.set(true);
             sz *= 2;
             try {
@@ -97,7 +98,7 @@ public class ExtendedOnePageMemoryTest {
         try (MemoryMR mem = new MemoryCMRImpl()) {
             FILE_MAP_FAIL.set(true);
             try {
-                mem.smallFile(ff, path, MemoryTag.MMAP_DEFAULT);
+                mem.smallFile(ff, path.$(), MemoryTag.MMAP_DEFAULT);
                 Assert.fail();
             } catch (CairoException ex) {
                 TestUtils.assertContains(ex.getFlyweightMessage(), "could not mmap");

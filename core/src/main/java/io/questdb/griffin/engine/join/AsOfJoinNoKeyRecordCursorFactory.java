@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,37 +24,34 @@
 
 package io.questdb.griffin.engine.join;
 
-import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.sql.Record;
-import io.questdb.cairo.sql.RecordCursor;
-import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.cairo.sql.*;
 import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.std.Misc;
 
-public class AsOfJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactory {
+public class AsOfJoinNoKeyRecordCursorFactory extends AbstractJoinRecordCursorFactory {
     private final AsOfLightJoinRecordCursor cursor;
-    private final RecordCursorFactory masterFactory;
-    private final RecordCursorFactory slaveFactory;
 
     public AsOfJoinNoKeyRecordCursorFactory(
             RecordMetadata metadata,
             RecordCursorFactory masterFactory,
             RecordCursorFactory slaveFactory,
             int columnSplit
-
     ) {
-        super(metadata);
-        this.masterFactory = masterFactory;
-        this.slaveFactory = slaveFactory;
+        super(metadata, null, masterFactory, slaveFactory);
         this.cursor = new AsOfLightJoinRecordCursor(
                 columnSplit,
                 NullRecordFactory.getInstance(slaveFactory.getMetadata()),
                 masterFactory.getMetadata().getTimestampIndex(),
                 slaveFactory.getMetadata().getTimestampIndex()
         );
+    }
+
+    @Override
+    public boolean followedOrderByAdvice() {
+        return masterFactory.followedOrderByAdvice();
     }
 
     @Override
@@ -91,9 +88,9 @@ public class AsOfJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactor
 
     @Override
     protected void _close() {
-        ((JoinRecordMetadata) getMetadata()).close();
-        masterFactory.close();
-        slaveFactory.close();
+        Misc.freeIfCloseable(getMetadata());
+        Misc.free(masterFactory);
+        Misc.free(slaveFactory);
     }
 
     private static class AsOfLightJoinRecordCursor extends AbstractJoinCursor {
@@ -118,6 +115,11 @@ public class AsOfJoinNoKeyRecordCursorFactory extends AbstractRecordCursorFactor
             this.record = new OuterJoinRecord(columnSplit, nullRecord);
             this.masterTimestampIndex = masterTimestampIndex;
             this.slaveTimestampIndex = slaveTimestampIndex;
+        }
+
+        @Override
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            masterCursor.calculateSize(circuitBreaker, counter);
         }
 
         @Override

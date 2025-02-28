@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -41,7 +41,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 public abstract class AbstractLineProtoUdpReceiver extends SynchronizedJob implements Closeable {
     private static final Log LOG = LogFactory.getLog(AbstractLineProtoUdpReceiver.class);
-    protected final int commitMode;
     protected final LineUdpLexer lexer;
     protected final NetworkFacade nf;
     protected final LineUdpParserImpl parser;
@@ -50,7 +49,7 @@ public abstract class AbstractLineProtoUdpReceiver extends SynchronizedJob imple
     private final AtomicBoolean running = new AtomicBoolean(false);
     private final SOCountDownLatch started = new SOCountDownLatch(1);
     protected int commitRate;
-    protected int fd;
+    protected long fd;
     protected long totalCount = 0;
 
     public AbstractLineProtoUdpReceiver(
@@ -59,7 +58,6 @@ public abstract class AbstractLineProtoUdpReceiver extends SynchronizedJob imple
             WorkerPool workerPool
     ) {
         this.configuration = configuration;
-        this.commitMode = configuration.getCommitMode();
         nf = configuration.getNetworkFacade();
         fd = nf.socketUdp();
         if (fd < 0) {
@@ -108,7 +106,7 @@ public abstract class AbstractLineProtoUdpReceiver extends SynchronizedJob imple
                 LOG.info().$("closed [fd=").$(fd).$(']').$();
             }
             if (parser != null) {
-                parser.commitAll(commitMode);
+                parser.commitAll();
                 parser.close();
             }
             Misc.free(lexer);

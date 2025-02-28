@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,6 +24,7 @@
 
 package io.questdb.mp;
 
+import io.questdb.std.Os;
 import io.questdb.std.Unsafe;
 
 import java.util.concurrent.locks.LockSupport;
@@ -47,7 +48,11 @@ public class SOCountDownLatch implements CountDownLatchSPI {
     public void await() {
         this.waiter = Thread.currentThread();
         while (getCount() > 0) {
-            LockSupport.park();
+            // Don't use LockSupport.park() here.
+            // Once in a while there can be a delay between check of this.count > -count
+            // and parking and unparkWaiter() will be called before park().
+            // Limit the parking time by using Os.park() instead of LockSupport.park()
+            Os.park();
         }
     }
 
@@ -65,9 +70,11 @@ public class SOCountDownLatch implements CountDownLatchSPI {
             if (elapsed < nanos) {
                 if (getCount() == 0) {
                     return true;
+                } else {
+                    nanos -= elapsed;
                 }
             } else {
-                return false;
+                return getCount() == 0;
             }
         }
     }

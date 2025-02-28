@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,11 +27,18 @@ package io.questdb.cairo;
 import io.questdb.cairo.sql.TableRecordMetadata;
 import io.questdb.griffin.engine.ops.AlterOperation;
 import io.questdb.griffin.engine.ops.UpdateOperation;
+import org.jetbrains.annotations.NotNull;
+import org.jetbrains.annotations.Nullable;
 
 import java.io.Closeable;
 
 public interface TableWriterAPI extends Closeable {
-    void addColumn(CharSequence columnName, int columnType);
+
+    default void addColumn(@NotNull CharSequence columnName, int columnType) {
+        addColumn(columnName, columnType, null);
+    }
+
+    void addColumn(@NotNull CharSequence columnName, int columnType, @Nullable SecurityContext securityContext);
 
     /**
      * Adds new column to table, which can be either empty or can have data already. When existing columns
@@ -61,6 +68,7 @@ public interface TableWriterAPI extends Closeable {
      * @param columnType              {@link ColumnType}
      * @param isIndexed               configures column to be indexed or not
      * @param indexValueBlockCapacity approximation of number of rows for single index key, must be power of 2
+     * @param isSequential            unused, should be false
      */
     void addColumn(
             CharSequence columnName,
@@ -68,7 +76,8 @@ public interface TableWriterAPI extends Closeable {
             int symbolCapacity,
             boolean symbolCacheFlag,
             boolean isIndexed,
-            int indexValueBlockCapacity
+            int indexValueBlockCapacity,
+            boolean isSequential
     );
 
     long apply(AlterOperation alterOp, boolean contextAllowsAnyStructureChanges) throws AlterTableContextException;
@@ -78,7 +87,7 @@ public interface TableWriterAPI extends Closeable {
     @Override
     void close();
 
-    long commit();
+    void commit();
 
     TableRecordMetadata getMetadata();
 
@@ -87,7 +96,7 @@ public interface TableWriterAPI extends Closeable {
      *
      * @return table structure version
      */
-    long getStructureVersion();
+    long getMetadataVersion();
 
     /**
      * Returns safe watermark for the symbol count stored in the given column.
@@ -123,6 +132,8 @@ public interface TableWriterAPI extends Closeable {
 
     TableWriter.Row newRow(long timestamp);
 
+    TableWriter.Row newRowDeferTimestamp();
+
     void rollback();
 
     /**
@@ -132,5 +143,19 @@ public interface TableWriterAPI extends Closeable {
      */
     boolean supportsMultipleWriters();
 
+    /**
+     * Truncates non-WAL table. This method has to be called when the
+     * {@link CairoEngine#lockReaders(TableToken)} lock is held, i.e. when there are no readers reading from the table.
+     *
+     * @throws UnsupportedOperationException when called a WAL table.
+     */
     void truncate();
+
+    /**
+     * Truncates table, but keeps symbol tables, i.e. internal symbol string to symbol int code maps.
+     * Sometimes the symbols should be kept to make sure that DETACH/ATTACH PARTITION does not lose data
+     * for symbol columns. For non-WAL tables, this method has to be called when the
+     * {@link CairoEngine#lockReaders(TableToken)} lock is held, i.e. when there are no readers reading from the table.
+     */
+    void truncateSoft();
 }

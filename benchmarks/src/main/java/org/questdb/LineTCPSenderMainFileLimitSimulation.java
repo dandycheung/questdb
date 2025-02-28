@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
  *
  *  Unless required by applicable law or agreed to in writing, software
  *  distributed under the License is distributed on an "AS IS" BASIS,
- *  WITHOUT WARRANTIES OR CONDITIONS OF ANY t5, either express or implied.
+ *  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
  *  See the License for the specific language governing permissions and
  *  limitations under the License.
  *
@@ -31,7 +31,6 @@ import io.questdb.std.NumericException;
 import io.questdb.std.Os;
 import io.questdb.std.Rnd;
 import io.questdb.std.datetime.microtime.Timestamps;
-import io.questdb.std.str.StringSink;
 
 import java.util.concurrent.locks.LockSupport;
 
@@ -78,10 +77,9 @@ public class LineTCPSenderMainFileLimitSimulation {
     private static final String[] nr = new String[70];
     private static final String[] puui = new String[70];
     private static final String[] rpcm = new String[41];
-    private static final StringSink sink = new StringSink();
     private static final String[] t5 = new String[70];
 
-    public static void main(String[] args) throws NumericException {
+    public static void main(String[] args) {
         Rnd rnd = new Rnd();
         generateStrings(rnd, auui, 16);
         generateStrings(rnd, puui, 16);

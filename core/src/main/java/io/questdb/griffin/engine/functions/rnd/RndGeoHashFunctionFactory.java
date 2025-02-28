@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -49,13 +49,15 @@ public class RndGeoHashFunctionFactory implements FunctionFactory {
     }
 
     @Override
-    public Function newInstance(int position,
-                                ObjList<Function> args,
-                                IntList argPositions,
-                                CairoConfiguration configuration,
-                                SqlExecutionContext sqlExecutionContext) throws SqlException {
+    public Function newInstance(
+            int position,
+            ObjList<Function> args,
+            IntList argPositions,
+            CairoConfiguration configuration,
+            SqlExecutionContext sqlExecutionContext
+    ) throws SqlException {
         int bits = args.getQuick(0).getInt(null);
-        if (bits < 1 || bits > ColumnType.GEO_HASH_MAX_BITS_LENGTH) {
+        if (bits < 1 || bits > ColumnType.GEOLONG_MAX_BITS) {
             throw SqlException.$(argPositions.getQuick(0), "precision must be in [1..60] range");
         }
         final int type = ColumnType.getGeoHashTypeWithBits(bits);
@@ -92,8 +94,8 @@ public class RndGeoHashFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public boolean isNonDeterministic() {
+            return true;
         }
 
         @Override
@@ -128,8 +130,8 @@ public class RndGeoHashFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public boolean isNonDeterministic() {
+            return true;
         }
 
         @Override
@@ -164,8 +166,8 @@ public class RndGeoHashFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public boolean isNonDeterministic() {
+            return true;
         }
 
         @Override
@@ -195,8 +197,8 @@ public class RndGeoHashFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public boolean isReadThreadSafe() {
-            return false;
+        public boolean isNonDeterministic() {
+            return true;
         }
 
         @Override

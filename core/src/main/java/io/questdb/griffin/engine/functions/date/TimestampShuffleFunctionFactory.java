@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -52,12 +52,17 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
             CairoConfiguration configuration,
             SqlExecutionContext sqlExecutionContext
     ) {
-        final long start = args.getQuick(0).getTimestamp(null);
-        final long end = args.getQuick(1).getTimestamp(null);
-        if (start == Numbers.LONG_NaN || end == Numbers.LONG_NaN) {
+        long start = args.getQuick(0).getTimestamp(null);
+        long end = args.getQuick(1).getTimestamp(null);
+        if (start == Numbers.LONG_NULL || end == Numbers.LONG_NULL) {
             return TimestampConstant.NULL;
         }
-        return new TimestampShuffleFunction(start, end);
+
+        if (start <= end) {
+            return new TimestampShuffleFunction(start, end);
+        } else {
+            return new TimestampShuffleFunction(end, start);
+        }
     }
 
     private static class TimestampShuffleFunction extends TimestampFunction {
@@ -71,10 +76,6 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
         }
 
         @Override
-        public void close() {
-        }
-
-        @Override
         public long getTimestamp(Record rec) {
             return start + rnd.nextPositiveLong() % (end - start);
         }
@@ -82,11 +83,6 @@ public class TimestampShuffleFunctionFactory implements FunctionFactory {
         @Override
         public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) {
             rnd = executionContext.getRandom();
-        }
-
-        @Override
-        public boolean isReadThreadSafe() {
-            return false;
         }
 
         @Override

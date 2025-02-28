@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,9 +26,11 @@ package io.questdb.cairo.sql;
 
 import io.questdb.cairo.ColumnTypes;
 import io.questdb.std.BinarySequence;
+import io.questdb.std.Interval;
 import io.questdb.std.Long256;
 import io.questdb.std.ObjList;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 public class VirtualRecord implements ColumnTypes, Record {
     private final int columnCount;
@@ -119,8 +121,18 @@ public class VirtualRecord implements ColumnTypes, Record {
     }
 
     @Override
+    public int getIPv4(int col) {
+        return getFunction(col).getIPv4(base);
+    }
+
+    @Override
     public int getInt(int col) {
         return getFunction(col).getInt(base);
+    }
+
+    @Override
+    public Interval getInterval(int col) {
+        return getFunction(col).getInterval(base);
     }
 
     @Override
@@ -139,7 +151,7 @@ public class VirtualRecord implements ColumnTypes, Record {
     }
 
     @Override
-    public void getLong256(int col, CharSink sink) {
+    public void getLong256(int col, CharSink<?> sink) {
         getFunction(col).getLong256(base, sink);
     }
 
@@ -169,13 +181,8 @@ public class VirtualRecord implements ColumnTypes, Record {
     }
 
     @Override
-    public CharSequence getStr(int col) {
-        return getFunction(col).getStr(base);
-    }
-
-    @Override
-    public void getStr(int col, CharSink sink) {
-        getFunction(col).getStr(base, sink);
+    public CharSequence getStrA(int col) {
+        return getFunction(col).getStrA(base);
     }
 
     @Override
@@ -189,7 +196,7 @@ public class VirtualRecord implements ColumnTypes, Record {
     }
 
     @Override
-    public CharSequence getSym(int col) {
+    public CharSequence getSymA(int col) {
         return getFunction(col).getSymbol(base);
     }
 
@@ -206,6 +213,21 @@ public class VirtualRecord implements ColumnTypes, Record {
     @Override
     public long getUpdateRowId() {
         return base.getUpdateRowId();
+    }
+
+    @Override
+    public Utf8Sequence getVarcharA(int col) {
+        return getFunction(col).getVarcharA(base);
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(int col) {
+        return getFunction(col).getVarcharB(base);
+    }
+
+    @Override
+    public int getVarcharSize(int col) {
+        return getFunction(col).getVarcharSize(base);
     }
 
     public void of(Record record) {

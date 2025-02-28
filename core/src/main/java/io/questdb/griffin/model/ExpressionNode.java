@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,8 +25,16 @@
 package io.questdb.griffin.model;
 
 import io.questdb.griffin.OperatorExpression;
-import io.questdb.std.*;
+import io.questdb.griffin.OperatorRegistry;
+import io.questdb.std.Chars;
+import io.questdb.std.Mutable;
+import io.questdb.std.Numbers;
+import io.questdb.std.ObjList;
+import io.questdb.std.ObjectFactory;
+import io.questdb.std.ObjectPool;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
 
 import java.util.Objects;
 
@@ -36,7 +44,7 @@ public class ExpressionNode implements Mutable, Sinkable {
     public static final int BIND_VARIABLE = 6;
     public static final int CONSTANT = 2;
     public static final int CONTROL = 16;
-    public final static ExpressionNodeFactory FACTORY = new ExpressionNodeFactory();
+    public static final ExpressionNodeFactory FACTORY = new ExpressionNodeFactory();
     public static final int FUNCTION = 8;
     public static final int LITERAL = 4;
     public static final int MEMBER_ACCESS = 5;
@@ -64,12 +72,11 @@ public class ExpressionNode implements Mutable, Sinkable {
         if (a == null && b == null) {
             return true;
         }
-
         if (a == null || b == null || a.type != b.type) {
             return false;
         }
-        return (a.type == FUNCTION || a.type == LITERAL ? Chars.equalsIgnoreCase(a.token, b.token) : Chars.equals(a.token, b.token)) &&
-                compareArgsExact(a, b);
+        return (a.type == FUNCTION || a.type == LITERAL ? Chars.equalsIgnoreCase(a.token, b.token) : Chars.equals(a.token, b.token))
+                && compareArgsExact(a, b);
     }
 
     public static boolean compareNodesGroupBy(
@@ -86,7 +93,6 @@ public class ExpressionNode implements Mutable, Sinkable {
         }
 
         if (!Chars.equals(groupByExpr.token, columnExpr.token)) {
-
             int index = translatingModel.getAliasToColumnMap().keyIndex(columnExpr.token);
             if (index > -1) {
                 return false;
@@ -100,11 +106,9 @@ public class ExpressionNode implements Mutable, Sinkable {
             }
 
             int dot = Chars.indexOf(tok, '.');
-
-            if (dot > -1 &&
-                    translatingModel.getModelAliasIndex(tok, 0, dot) > -1
-                    && Chars.equals(qcTok, tok, dot + 1, tok.length())
-            ) {
+            if (dot > -1
+                    && translatingModel.getModelAliasIndex(tok, 0, dot) > -1
+                    && Chars.equals(qcTok, tok, dot + 1, tok.length())) {
                 return compareArgs(groupByExpr, columnExpr, translatingModel);
             }
 
@@ -167,19 +171,28 @@ public class ExpressionNode implements Mutable, Sinkable {
                 && Objects.equals(rhs, that.rhs);
     }
 
-    public boolean hasLeafs() {
-        return lhs != null && rhs != null;
-    }
-
     @Override
     public int hashCode() {
         return Objects.hash(args, token, queryModel, precedence, position, lhs, rhs, type, paramCount, intrinsicValue, innerPredicate);
     }
 
+    public boolean isWildcard() {
+        return type == LITERAL && Chars.endsWith(token, '*');
+    }
+
+    public boolean noLeafs() {
+        return lhs == null || rhs == null;
+    }
+
     public ExpressionNode of(int type, CharSequence token, int precedence, int position) {
         clear();
         // override literal with bind variable
-        if (type == LITERAL && token != null && token.length() != 0 && (token.charAt(0) == '$' || token.charAt(0) == ':')) {
+        if (
+                type == LITERAL
+                        && token != null
+                        && token.length() != 0
+                        && ((token.charAt(0) == '$' && Numbers.isDecimal(token, 1)) || token.charAt(0) == ':')
+        ) {
             this.type = BIND_VARIABLE;
         } else {
             this.type = type;
@@ -191,66 +204,68 @@ public class ExpressionNode implements Mutable, Sinkable {
     }
 
     @Override
-    public void toSink(CharSink sink) {
+    public void toSink(@NotNull CharSink<?> sink) {
+        // note: it's safe to take any registry (new or old) because we don't use precedence here
+        OperatorRegistry registry = OperatorExpression.getRegistry();
         switch (paramCount) {
             case 0:
                 if (queryModel != null) {
-                    sink.put('(').put(queryModel).put(')');
+                    sink.putAscii('(').put(queryModel).putAscii(')');
                 } else {
                     sink.put(token);
                     if (type == FUNCTION) {
-                        sink.put("()");
+                        sink.putAscii("()");
                     }
                 }
                 break;
             case 1:
                 sink.put(token);
-                sink.put('(');
-                rhs.toSink(sink);
-                sink.put(')');
+                sink.putAscii('(');
+                toSink(sink, rhs);
+                sink.putAscii(')');
                 break;
             case 2:
-                if (OperatorExpression.isOperator(token)) {
-                    lhs.toSink(sink);
-                    sink.put(' ');
+                if (registry.isOperator(token)) {
+                    toSink(sink, lhs);
+                    sink.putAscii(' ');
                     sink.put(token);
-                    sink.put(' ');
-                    rhs.toSink(sink);
+                    sink.putAscii(' ');
+                    toSink(sink, rhs);
                 } else {
                     sink.put(token);
-                    sink.put('(');
-                    lhs.toSink(sink);
-                    sink.put(',');
-                    rhs.toSink(sink);
-                    sink.put(')');
+                    sink.putAscii('(');
+                    toSink(sink, lhs);
+                    sink.putAscii(',');
+                    toSink(sink, rhs);
+                    sink.putAscii(')');
                 }
                 break;
             default:
                 int n = args.size();
-                if (OperatorExpression.isOperator(token) && n > 0) {
+                if (registry.isOperator(token) && n > 0) {
                     // special case for "in"
-                    args.getQuick(n - 1).toSink(sink);
-                    sink.put(' ');
+                    toSink(sink, args.getQuick(n - 1));
+                    sink.putAscii(' ');
                     sink.put(token);
-                    sink.put(' ');
-                    sink.put('(');
+                    sink.putAscii(' ');
+                    sink.putAscii('(');
                     for (int i = n - 2; i > -1; i--) {
                         if (i < n - 2) {
-                            sink.put(',');
+                            sink.putAscii(',');
                         }
-                        args.getQuick(i).toSink(sink);
+                        toSink(sink, args.getQuick(i));
                     }
-                    sink.put(')');
+                    sink.putAscii(')');
                 } else {
                     sink.put(token);
-                    sink.put('(');
+                    sink.putAscii('(');
                     for (int i = n - 1; i > -1; i--) {
                         if (i < n - 1) {
-                            sink.put(',');
+                            sink.putAscii(',');
                         }
-                        args.getQuick(i).toSink(sink);
+                        toSink(sink, args.getQuick(i));
                     }
-                    sink.put(')');
+                    sink.putAscii(')');
                 }
                 break;
         }
@@ -299,6 +314,14 @@ public class ExpressionNode implements Mutable, Sinkable {
             }
         }
         return true;
+    }
+
+    private static void toSink(CharSink<?> sink, ExpressionNode e) {
+        if (e == null) {
+            sink.putAscii("null");
+        } else {
+            e.toSink(sink);
+        }
     }
 
     public static final class ExpressionNodeFactory implements ObjectFactory<ExpressionNode> {

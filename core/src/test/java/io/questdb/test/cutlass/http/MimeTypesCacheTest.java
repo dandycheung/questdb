@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -27,22 +27,23 @@ package io.questdb.test.cutlass.http;
 import io.questdb.cutlass.http.HttpException;
 import io.questdb.cutlass.http.MimeTypesCache;
 import io.questdb.std.Chars;
-import io.questdb.std.Files;
 import io.questdb.std.FilesFacade;
-import io.questdb.std.Os;
-import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.std.str.LPSZ;
 import io.questdb.std.str.Path;
+import io.questdb.std.str.Utf8String;
+import io.questdb.test.AbstractTest;
+import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.test.tools.TestUtils;
 import org.junit.Assert;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.Timeout;
 
+import java.io.InputStream;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class MimeTypesCacheTest {
+public class MimeTypesCacheTest extends AbstractTest {
 
     @Rule
     public Timeout timeout = Timeout.builder()
@@ -56,7 +57,7 @@ public class MimeTypesCacheTest {
             try (Path path = new Path()) {
                 path.of("/tmp/sdrqwhlkkhlkhasdlkahdoiquweoiuweoiqwe.ok").$();
                 try {
-                    new MimeTypesCache(TestFilesFacadeImpl.INSTANCE, path);
+                    new MimeTypesCache(TestFilesFacadeImpl.INSTANCE, path.$());
                     Assert.fail();
                 } catch (HttpException e) {
                     Assert.assertTrue(Chars.startsWith(e.getMessage(), "could not open"));
@@ -70,23 +71,23 @@ public class MimeTypesCacheTest {
         AtomicInteger closeCount = new AtomicInteger(0);
         testFailure(new TestFilesFacadeImpl() {
             @Override
-            public boolean close(int fd) {
+            public boolean close(long fd) {
                 closeCount.incrementAndGet();
                 return true;
             }
 
             @Override
-            public long length(int fd) {
+            public long length(long fd) {
                 return 1024;
             }
 
             @Override
-            public int openRO(LPSZ name) {
+            public long openRO(LPSZ name) {
                 return 123;
             }
 
             @Override
-            public long read(int fd, long buf, long len, long offset) {
+            public long read(long fd, long buf, long len, long offset) {
                 return -1;
             }
         }, "could not read");
@@ -100,23 +101,23 @@ public class MimeTypesCacheTest {
         testFailure(new TestFilesFacadeImpl() {
 
             @Override
-            public boolean close(int fd) {
+            public boolean close(long fd) {
                 closeCount.incrementAndGet();
                 return true;
             }
 
             @Override
-            public long length(int fd) {
+            public long length(long fd) {
                 return 1024;
             }
 
             @Override
-            public int openRO(LPSZ name) {
+            public long openRO(LPSZ name) {
                 return 123;
             }
 
             @Override
-            public long read(int fd, long buf, long len, long offset) {
+            public long read(long fd, long buf, long len, long offset) {
                 return 128;
             }
         }, "could not read");
@@ -126,25 +127,22 @@ public class MimeTypesCacheTest {
 
     @Test
     public void testSimple() throws Exception {
+        TestUtils.assertMemoryLeak(() -> {
+            try (Path path = new Path()) {
+                String filePath = TestUtils.getTestResourcePath("/mime.types");
+                path.of(filePath).$();
+                assertMimeTypes(new MimeTypesCache(TestFilesFacadeImpl.INSTANCE, path.$()));
+            }
+        });
+    }
+
+    @Test
+    public void testSimpleResource() throws Exception {
         TestUtils.assertMemoryLeak(new TestUtils.LeakProneCode() {
             @Override
-            public void run() {
-                try (Path path = new Path()) {
-                    String filePath;
-                    if (Os.isWindows()) {
-                        filePath = Files.getResourcePath(getClass().getResource("/mime.types")).substring(1);
-                    } else {
-                        filePath = Files.getResourcePath(getClass().getResource("/mime.types"));
-                    }
-                    path.of(filePath).$();
-                    MimeTypesCache mimeTypes = new MimeTypesCache(TestFilesFacadeImpl.INSTANCE, path);
-                    Assert.assertEquals(980, mimeTypes.size());
-                    TestUtils.assertEquals("application/andrew-inset", mimeTypes.get("ez"));
-                    TestUtils.assertEquals("application/inkml+xml", mimeTypes.get("ink"));
-                    TestUtils.assertEquals("application/inkml+xml", mimeTypes.get("inkml"));
-                    TestUtils.assertEquals("application/mp21", mimeTypes.get("m21"));
-                    TestUtils.assertEquals("application/mp21", mimeTypes.get("mp21"));
-                    TestUtils.assertEquals("application/mp4", mimeTypes.get("mp4s"));
+            public void run() throws Exception {
+                try (InputStream inputStream = getClass().getResourceAsStream("/mime.types")) {
+                    assertMimeTypes(new MimeTypesCache(inputStream));
                 }
             }
         });
@@ -155,18 +153,18 @@ public class MimeTypesCacheTest {
         AtomicInteger closeCount = new AtomicInteger();
         testFailure(new TestFilesFacadeImpl() {
             @Override
-            public boolean close(int fd) {
+            public boolean close(long fd) {
                 closeCount.incrementAndGet();
                 return true;
             }
 
             @Override
-            public long length(int fd) {
+            public long length(long fd) {
                 return 0;
             }
 
             @Override
-            public int openRO(LPSZ name) {
+            public long openRO(LPSZ name) {
                 return 123;
             }
         }, "wrong file size");
@@ -179,18 +177,18 @@ public class MimeTypesCacheTest {
         AtomicInteger closeCount = new AtomicInteger(0);
         testFailure(new TestFilesFacadeImpl() {
             @Override
-            public boolean close(int fd) {
+            public boolean close(long fd) {
                 closeCount.incrementAndGet();
                 return true;
             }
 
             @Override
-            public long length(int fd) {
+            public long length(long fd) {
                 return -1;
             }
 
             @Override
-            public int openRO(LPSZ name) {
+            public long openRO(LPSZ name) {
                 return 123;
             }
         }, "wrong file size");
@@ -203,18 +201,18 @@ public class MimeTypesCacheTest {
         AtomicInteger closeCount = new AtomicInteger();
         testFailure(new TestFilesFacadeImpl() {
             @Override
-            public boolean close(int fd) {
+            public boolean close(long fd) {
                 closeCount.incrementAndGet();
                 return true;
             }
 
             @Override
-            public long length(int fd) {
+            public long length(long fd) {
                 return 1024 * 1024 * 2;
             }
 
             @Override
-            public int openRO(LPSZ name) {
+            public long openRO(LPSZ name) {
                 return 123;
             }
         }, "wrong file size");
@@ -222,11 +220,22 @@ public class MimeTypesCacheTest {
         Assert.assertEquals(1, closeCount.get());
     }
 
+    private static void assertMimeTypes(MimeTypesCache mimeTypes) {
+        Assert.assertEquals(981, mimeTypes.size());
+        TestUtils.assertEquals("application/andrew-inset", mimeTypes.get(new Utf8String("ez")));
+        TestUtils.assertEquals("application/inkml+xml", mimeTypes.get(new Utf8String("ink")));
+        TestUtils.assertEquals("application/inkml+xml", mimeTypes.get(new Utf8String("inkml")));
+        TestUtils.assertEquals("application/mp21", mimeTypes.get(new Utf8String("m21")));
+        TestUtils.assertEquals("application/mp21", mimeTypes.get(new Utf8String("mp21")));
+        TestUtils.assertEquals("application/mp4", mimeTypes.get(new Utf8String("mp4s")));
+        TestUtils.assertEquals("x-conference/x-cooltalk", mimeTypes.get(new Utf8String("ice")));
+    }
+
     private void testFailure(FilesFacade ff, CharSequence startsWith) throws Exception {
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path()) {
                 try {
-                    new MimeTypesCache(ff, path);
+                    new MimeTypesCache(ff, path.$());
                     Assert.fail();
                 } catch (HttpException e) {
                     Assert.assertTrue(Chars.startsWith(e.getMessage(), startsWith));

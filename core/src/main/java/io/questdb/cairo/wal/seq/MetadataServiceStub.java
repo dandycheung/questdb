@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -28,11 +28,13 @@ import io.questdb.cairo.AttachDetachStatus;
 import io.questdb.cairo.CairoException;
 import io.questdb.cairo.UpdateOperator;
 import io.questdb.cairo.wal.MetadataService;
+import io.questdb.std.LongList;
+import org.jetbrains.annotations.NotNull;
 
 public interface MetadataServiceStub extends MetadataService {
 
     @Override
-    default void addIndex(CharSequence columnName, int indexValueBlockSize) {
+    default void addIndex(@NotNull CharSequence columnName, int indexValueBlockSize) {
         throw CairoException.critical(0).put("add index does not update sequencer metadata");
     }
 
@@ -47,17 +49,40 @@ public interface MetadataServiceStub extends MetadataService {
     }
 
     @Override
+    default boolean convertPartitionNativeToParquet(long partitionTimestamp) {
+        throw CairoException.critical(0).put("convert native partition to parquet does not update sequencer metadata");
+    }
+
+    @Override
+    default boolean convertPartitionParquetToNative(long partitionTimestamp) {
+        throw CairoException.critical(0).put("convert parquet partition to native does not update sequencer metadata");
+    }
+
+    @Override
     default AttachDetachStatus detachPartition(long partitionTimestamp) {
         throw CairoException.critical(0).put("detach partition does not update sequencer metadata");
     }
 
     @Override
-    default void dropIndex(CharSequence columnName) {
+    default void disableDeduplication() {
+    }
+
+    @Override
+    default void dropIndex(@NotNull CharSequence columnName) {
         throw CairoException.critical(0).put("drop index does not update sequencer metadata");
     }
 
     @Override
-    default long getMetaMaxUncommittedRows() {
+    default boolean enableDeduplicationWithUpsertKeys(LongList columnsIndexes) {
+        return false;
+    }
+
+    default void forceRemovePartitions(LongList partitionTimestamps) {
+        throw CairoException.critical(0).put("recover partitions does not update sequencer metadata");
+    }
+
+    @Override
+    default int getMetaMaxUncommittedRows() {
         throw new UnsupportedOperationException();
     }
 
@@ -78,7 +103,7 @@ public interface MetadataServiceStub extends MetadataService {
 
     @Override
     default void setMetaMaxUncommittedRows(int maxUncommittedRows) {
-        throw CairoException.critical(0).put("change max uncommitted does not update sequencer metadata");
+        throw CairoException.critical(0).put("change of max uncommitted does not update sequencer metadata");
     }
 
     @Override
@@ -87,8 +112,17 @@ public interface MetadataServiceStub extends MetadataService {
     }
 
     @Override
+    default void setMetaTtlHoursOrMonths(int metaTtlHoursOrMonths) {
+        throw CairoException.critical(0).put("change of TTL does not update sequencer metadata");
+    }
+
+    @Override
+    default void squashPartitions() {
+        throw CairoException.critical(0).put("partition squash does not update sequencer metadata");
+    }
+
+    @Override
     default void tick() {
         // no-op
     }
 }
-

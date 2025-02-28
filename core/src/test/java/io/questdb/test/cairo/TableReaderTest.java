@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,84 +24,107 @@
 
 package io.questdb.test.cairo;
 
-import io.questdb.cairo.*;
+import io.questdb.PropertyKey;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.CairoException;
+import io.questdb.cairo.ColumnPurgeJob;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableReader;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.TableUtils;
+import io.questdb.cairo.TableWriter;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMARW;
-import io.questdb.std.*;
+import io.questdb.griffin.SqlException;
+import io.questdb.mp.SOCountDownLatch;
+import io.questdb.std.BinarySequence;
+import io.questdb.std.Chars;
+import io.questdb.std.Files;
+import io.questdb.std.FilesFacade;
+import io.questdb.std.LongList;
+import io.questdb.std.MemoryTag;
+import io.questdb.std.Numbers;
+import io.questdb.std.NumericException;
+import io.questdb.std.Os;
+import io.questdb.std.Rnd;
+import io.questdb.std.Unsafe;
 import io.questdb.std.datetime.DateFormat;
 import io.questdb.std.datetime.microtime.TimestampFormatUtils;
 import io.questdb.std.datetime.microtime.Timestamps;
+import io.questdb.std.datetime.millitime.DateFormatUtils;
 import io.questdb.std.str.LPSZ;
 import io.questdb.std.str.Path;
+import io.questdb.std.str.Sinkable;
 import io.questdb.std.str.StringSink;
+import io.questdb.std.str.Utf8s;
 import io.questdb.test.AbstractCairoTest;
 import io.questdb.test.CreateTableTestUtils;
 import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.test.tools.TestUtils;
+import org.jetbrains.annotations.NotNull;
 import org.junit.Assert;
-import org.junit.Ignore;
 import org.junit.Test;
 
 import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.CyclicBarrier;
-import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class TableReaderTest extends AbstractCairoTest {
     public static final int DO_NOT_CARE = 0;
     public static final int MUST_NOT_SWITCH = 2;
     public static final int MUST_SWITCH = 1;
-    private static final RecordAssert BATCH2_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 11);
-    private static final RecordAssert BATCH3_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NaN, r.getInt(12));
+    private static final RecordAssert BATCH2_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 12);
+    private static final RecordAssert BATCH3_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NULL, r.getInt(13));
     private static final RecordAssert BATCH4_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
-        Assert.assertEquals(0, r.getShort(13));
-        Assert.assertFalse(r.getBool(14));
-        Assert.assertEquals(0, r.getByte(15));
-        Assert.assertTrue(Float.isNaN(r.getFloat(16)));
-        Assert.assertTrue(Double.isNaN(r.getDouble(17)));
-        Assert.assertNull(r.getSym(18));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getLong(19));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getDate(20));
-        Assert.assertNull(r.getBin(21));
-        Assert.assertEquals(TableUtils.NULL_LEN, r.getBinLen(21));
+        Assert.assertEquals(0, r.getShort(14));
+        Assert.assertFalse(r.getBool(15));
+        Assert.assertEquals(0, r.getByte(16));
+        Assert.assertTrue(Float.isNaN(r.getFloat(17)));
+        Assert.assertTrue(Double.isNaN(r.getDouble(18)));
+        Assert.assertNull(r.getSymA(19));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getLong(20));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getDate(21));
+        Assert.assertNull(r.getBin(22));
+        Assert.assertEquals(TableUtils.NULL_LEN, r.getBinLen(22));
     };
     private static final RecordAssert BATCH5_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
+        Assert.assertEquals(0, r.getShort(14));
+        Assert.assertFalse(r.getBool(15));
+        Assert.assertEquals(0, r.getByte(16));
+        Assert.assertTrue(Float.isNaN(r.getFloat(17)));
+        Assert.assertTrue(Double.isNaN(r.getDouble(18)));
+        Assert.assertNull(r.getSymA(19));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getLong(20));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getDate(21));
+    };
+    private static final RecordAssert BATCH_2_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 11);
+    private static final RecordAssert BATCH_2_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 10);
+    private static final RecordAssert BATCH_3_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NULL, r.getInt(12));
+    private static final RecordAssert BATCH_3_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NULL, r.getInt(11));
+    private static final RecordAssert BATCH_4_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
         Assert.assertEquals(0, r.getShort(13));
         Assert.assertFalse(r.getBool(14));
         Assert.assertEquals(0, r.getByte(15));
         Assert.assertTrue(Float.isNaN(r.getFloat(16)));
         Assert.assertTrue(Double.isNaN(r.getDouble(17)));
-        Assert.assertNull(r.getSym(18));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getLong(19));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getDate(20));
+        Assert.assertNull(r.getSymA(18));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getLong(19));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getDate(20));
     };
-    private static final RecordAssert BATCH_2_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 10);
-    private static final RecordAssert BATCH_2_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> assertNullStr(r, 9);
-    private static final RecordAssert BATCH_3_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NaN, r.getInt(11));
-    private static final RecordAssert BATCH_3_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> Assert.assertEquals(Numbers.INT_NaN, r.getInt(10));
-    private static final RecordAssert BATCH_4_7_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
+    private static final RecordAssert BATCH_4_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
         Assert.assertEquals(0, r.getShort(12));
         Assert.assertFalse(r.getBool(13));
         Assert.assertEquals(0, r.getByte(14));
         Assert.assertTrue(Float.isNaN(r.getFloat(15)));
         Assert.assertTrue(Double.isNaN(r.getDouble(16)));
-        Assert.assertNull(r.getSym(17));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getLong(18));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getDate(19));
+        Assert.assertNull(r.getSymA(17));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getLong(18));
+        Assert.assertEquals(Numbers.LONG_NULL, r.getDate(19));
     };
-    private static final RecordAssert BATCH_4_9_BEFORE_ASSERTER = (r, rnd, ts, blob) -> {
-        Assert.assertEquals(0, r.getShort(11));
-        Assert.assertFalse(r.getBool(12));
-        Assert.assertEquals(0, r.getByte(13));
-        Assert.assertTrue(Float.isNaN(r.getFloat(14)));
-        Assert.assertTrue(Double.isNaN(r.getDouble(15)));
-        Assert.assertNull(r.getSym(16));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getLong(17));
-        Assert.assertEquals(Numbers.LONG_NaN, r.getDate(18));
-    };
+    private static final int CANNOT_DELETE = -1;
     private static final int blobLen = 64 * 1024;
     private static final RecordAssert BATCH1_ASSERTER = (r, exp, ts, blob) -> {
         if (exp.nextBoolean()) {
@@ -125,7 +148,7 @@ public class TableReaderTest extends AbstractCairoTest {
         if (exp.nextBoolean()) {
             Assert.assertEquals(exp.nextInt(), r.getInt(0));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(0));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(0));
         }
 
         if (exp.nextBoolean()) {
@@ -143,13 +166,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (exp.nextBoolean()) {
             Assert.assertEquals(exp.nextLong(), r.getLong(5));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(5));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(5));
         }
 
         if (exp.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(10));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(10));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(10));
         }
 
         assertBin(r, exp, blob, 9);
@@ -161,126 +184,126 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if (exp.nextBoolean()) {
-            TestUtils.assertEquals(exp.nextChars(7), r.getSym(7));
+            TestUtils.assertEquals(exp.nextChars(7), r.getSymA(7));
         } else {
-            Assert.assertNull(r.getSym(7));
+            Assert.assertNull(r.getSymA(7));
         }
     };
     private static final RecordAssert BATCH2_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH1_ASSERTER.assertRecord(r, rnd, ts, blob);
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 11);
+            assertStrColumn(rnd.nextChars(15), r, 12);
         }
     };
     private static final RecordAssert BATCH3_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH2_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(12));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(13));
         }
     };
     private static final RecordAssert BATCH4_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH3_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(13));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(14));
         } else {
-            Assert.assertEquals(0, r.getShort(13));
+            Assert.assertEquals(0, r.getShort(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(14));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(15));
         } else {
-            Assert.assertFalse(r.getBool(14));
+            Assert.assertFalse(r.getBool(15));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(15));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(16));
         } else {
-            Assert.assertEquals(0, r.getByte(15));
+            Assert.assertEquals(0, r.getByte(16));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(16), 0.00000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(17), 0.00000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(16)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(17)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(17), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(18), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(17)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(18)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(18));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(19));
         } else {
-            Assert.assertNull(r.getSym(18));
+            Assert.assertNull(r.getSymA(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(19));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(20));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(19));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(20));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(20));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(21));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(20));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(21));
         }
 
-        assertBin(r, rnd, blob, 21);
+        assertBin(r, rnd, blob, 22);
     };
     private static final RecordAssert BATCH6_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH3_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(13));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(14));
         } else {
-            Assert.assertEquals(0, r.getShort(13));
+            Assert.assertEquals(0, r.getShort(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(14));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(15));
         } else {
-            Assert.assertFalse(r.getBool(14));
+            Assert.assertFalse(r.getBool(15));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(15));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(16));
         } else {
-            Assert.assertEquals(0, r.getByte(15));
+            Assert.assertEquals(0, r.getByte(16));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(16), 0.00000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(17), 0.00000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(16)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(17)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(17), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(18), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(17)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(18)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(18));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(19));
         } else {
-            Assert.assertNull(r.getSym(18));
+            Assert.assertNull(r.getSymA(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(19));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(20));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(19));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(20));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(20));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(21));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(20));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(21));
         }
     };
     private static final RecordAssert BATCH5_ASSERTER = (r, rnd, ts, blob) -> {
@@ -289,203 +312,6 @@ public class TableReaderTest extends AbstractCairoTest {
         // generate blob to roll forward random generator, don't assert blob value
         if (rnd.nextBoolean()) {
             rnd.nextChars(blob, blobLen / 2);
-        }
-    };
-    private static final RecordAssert BATCH1_ASSERTER_NULL_BIN = (r, exp, ts, blob) -> {
-        // same as BATCH1_ASSERTER + special treatment of "bin" column
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextByte(), r.getByte(2));
-        } else {
-            Assert.assertEquals(0, r.getByte(2));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextBoolean(), r.getBool(8));
-        } else {
-            Assert.assertFalse(r.getBool(8));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextShort(), r.getShort(1));
-        } else {
-            Assert.assertEquals(0, r.getShort(1));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextInt(), r.getInt(0));
-        } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(0));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextDouble(), r.getDouble(3), 0.00000001);
-        } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(3)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextFloat(), r.getFloat(4), 0.000001f);
-        } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(4)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextLong(), r.getLong(5));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(5));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(ts, r.getDate(10));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(10));
-        }
-
-        // generate random bin for random generator state consistency
-        if (exp.nextBoolean()) {
-            exp.nextChars(blob, blobLen / 2);
-        }
-
-        Assert.assertEquals(TableUtils.NULL_LEN, r.getBinLen(9));
-        Assert.assertNull(r.getBin(9));
-
-        if (exp.nextBoolean()) {
-            assertStrColumn(exp.nextChars(10), r, 6);
-        } else {
-            assertNullStr(r, 6);
-        }
-
-        if (exp.nextBoolean()) {
-            TestUtils.assertEquals(exp.nextChars(7), r.getSym(7));
-        } else {
-            Assert.assertNull(r.getSym(7));
-        }
-    };
-    private static final RecordAssert BATCH1_ASSERTER_NULL_SYM = (r, exp, ts, blob) -> {
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextByte(), r.getByte(2));
-        } else {
-            Assert.assertEquals(0, r.getByte(2));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextBoolean(), r.getBool(8));
-        } else {
-            Assert.assertFalse(r.getBool(8));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextShort(), r.getShort(1));
-        } else {
-            Assert.assertEquals(0, r.getShort(1));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextInt(), r.getInt(0));
-        } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(0));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextDouble(), r.getDouble(3), 0.00000001);
-        } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(3)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextFloat(), r.getFloat(4), 0.000001f);
-        } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(4)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextLong(), r.getLong(5));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(5));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(ts, r.getDate(10));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(10));
-        }
-
-        assertBin(r, exp, blob, 9);
-
-        if (exp.nextBoolean()) {
-            assertStrColumn(exp.nextChars(10), r, 6);
-        } else {
-            assertNullStr(r, 6);
-        }
-
-        if (exp.nextBoolean()) {
-            exp.nextChars(7);
-        }
-        Assert.assertNull(r.getSym(7));
-    };
-    private static final RecordAssert BATCH1_ASSERTER_NULL_INT = (r, exp, ts, blob) -> {
-        // same as BATCH1_ASSERTER + special treatment of int field
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextByte(), r.getByte(2));
-        } else {
-            Assert.assertEquals(0, r.getByte(2));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextBoolean(), r.getBool(8));
-        } else {
-            Assert.assertFalse(r.getBool(8));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextShort(), r.getShort(1));
-        } else {
-            Assert.assertEquals(0, r.getShort(1));
-        }
-
-        if (exp.nextBoolean()) {
-            exp.nextInt();
-        }
-
-        Assert.assertEquals(Numbers.INT_NaN, r.getInt(0));
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextDouble(), r.getDouble(3), 0.00000001);
-        } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(3)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextFloat(), r.getFloat(4), 0.000001f);
-        } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(4)));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(exp.nextLong(), r.getLong(5));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(5));
-        }
-
-        if (exp.nextBoolean()) {
-            Assert.assertEquals(ts, r.getDate(10));
-        } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(10));
-        }
-
-        assertBin(r, exp, blob, 9);
-
-        if (exp.nextBoolean()) {
-            assertStrColumn(exp.nextChars(10), r, 6);
-        } else {
-            assertNullStr(r, 6);
-        }
-
-        if (exp.nextBoolean()) {
-            TestUtils.assertEquals(exp.nextChars(7), r.getSym(7));
-        } else {
-            Assert.assertNull(r.getSym(7));
         }
     };
     private static final RecordAssert BATCH1_7_ASSERTER = (r, exp, ts, blob) -> {
@@ -526,13 +352,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (exp.nextBoolean()) {
             Assert.assertEquals(exp.nextLong(), r.getLong(4));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(4));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(4));
         }
 
         if (exp.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(9));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(9));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(9));
         }
 
         assertBin(r, exp, blob, 8);
@@ -544,75 +370,75 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if (exp.nextBoolean()) {
-            TestUtils.assertEquals(exp.nextChars(7), r.getSym(6));
+            TestUtils.assertEquals(exp.nextChars(7), r.getSymA(6));
         } else {
-            Assert.assertNull(r.getSym(6));
+            Assert.assertNull(r.getSymA(6));
         }
 
-        Assert.assertEquals(Numbers.INT_NaN, r.getInt(20));
+        Assert.assertEquals(Numbers.INT_NULL, r.getInt(21));
     };
     private static final RecordAssert BATCH2_7_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH1_7_ASSERTER.assertRecord(r, rnd, ts, blob);
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 10);
+            assertStrColumn(rnd.nextChars(15), r, 11);
         }
     };
     private static final RecordAssert BATCH3_7_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH2_7_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(11));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(12));
         }
     };
     private static final RecordAssert BATCH6_7_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH3_7_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(12));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(13));
         } else {
-            Assert.assertEquals(0, r.getShort(12));
+            Assert.assertEquals(0, r.getShort(13));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(13));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(14));
         } else {
-            Assert.assertFalse(r.getBool(13));
+            Assert.assertFalse(r.getBool(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(14));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(15));
         } else {
-            Assert.assertEquals(0, r.getByte(14));
+            Assert.assertEquals(0, r.getByte(15));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(15), 0.00000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(16), 0.00000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(15)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(16)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(16), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(17), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(16)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(17)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(17));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(18));
         } else {
-            Assert.assertNull(r.getSym(17));
+            Assert.assertNull(r.getSymA(18));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(18));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(19));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(18));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(19));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(20));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(19));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(20));
         }
     };
     private static final RecordAssert BATCH5_7_ASSERTER = (r, rnd, ts, blob) -> {
@@ -661,13 +487,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (exp.nextBoolean()) {
             Assert.assertEquals(exp.nextLong(), r.getLong(4));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(4));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(4));
         }
 
         if (exp.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(8));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(8));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(8));
         }
 
         assertBin(r, exp, blob, 7);
@@ -682,70 +508,70 @@ public class TableReaderTest extends AbstractCairoTest {
         if (exp.nextBoolean()) {
             exp.nextChars(7);
         }
-        Assert.assertEquals(Numbers.INT_NaN, r.getInt(19));
+        Assert.assertEquals(Numbers.INT_NULL, r.getInt(20));
     };
     private static final RecordAssert BATCH2_9_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH1_9_ASSERTER.assertRecord(r, rnd, ts, blob);
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 9);
+            assertStrColumn(rnd.nextChars(15), r, 10);
         }
     };
     private static final RecordAssert BATCH3_9_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH2_9_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(10));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(11));
         }
     };
     private static final RecordAssert BATCH6_9_ASSERTER = (r, rnd, ts, blob) -> {
         BATCH3_9_ASSERTER.assertRecord(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(11));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(12));
         } else {
-            Assert.assertEquals(0, r.getShort(11));
+            Assert.assertEquals(0, r.getShort(12));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(12));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(13));
         } else {
-            Assert.assertFalse(r.getBool(12));
+            Assert.assertFalse(r.getBool(13));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(13));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(14));
         } else {
-            Assert.assertEquals(0, r.getByte(13));
+            Assert.assertEquals(0, r.getByte(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(14), 0.00000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(15), 0.00000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(14)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(15)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(15), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(16), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(15)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(16)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(16));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(17));
         } else {
-            Assert.assertNull(r.getSym(16));
+            Assert.assertNull(r.getSymA(17));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(17));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(18));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(17));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(18));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(18));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(19));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(18));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(19));
         }
     };
     private static final RecordAssert BATCH5_9_ASSERTER = (r, rnd, ts, blob) -> {
@@ -806,89 +632,89 @@ public class TableReaderTest extends AbstractCairoTest {
         BATCH1_GENERATOR.generate(r1, rnd1, ts1, blob1);
 
         if ((rnd1.nextPositiveInt() & 3) == 0) {
-            r1.putStr(11, rnd1.nextChars(15));
+            r1.putStr(12, rnd1.nextChars(15));
         }
     };
     private static final FieldGenerator BATCH3_GENERATOR = (r1, rnd1, ts1, blob1) -> {
         BATCH2_GENERATOR.generate(r1, rnd1, ts1, blob1);
 
         if ((rnd1.nextPositiveInt() & 3) == 0) {
-            r1.putInt(12, rnd1.nextInt());
+            r1.putInt(13, rnd1.nextInt());
         }
     };
     private static final FieldGenerator BATCH4_GENERATOR = (r, rnd, ts, blob) -> {
         BATCH3_GENERATOR.generate(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            r.putShort(13, rnd.nextShort());
+            r.putShort(14, rnd.nextShort());
         }
 
         if (rnd.nextBoolean()) {
-            r.putBool(14, rnd.nextBoolean());
+            r.putBool(15, rnd.nextBoolean());
         }
 
         if (rnd.nextBoolean()) {
-            r.putByte(15, rnd.nextByte());
+            r.putByte(16, rnd.nextByte());
         }
 
         if (rnd.nextBoolean()) {
-            r.putFloat(16, rnd.nextFloat());
+            r.putFloat(17, rnd.nextFloat());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDouble(17, rnd.nextDouble());
+            r.putDouble(18, rnd.nextDouble());
         }
 
         if (rnd.nextBoolean()) {
-            r.putSym(18, rnd.nextChars(10));
+            r.putSym(19, rnd.nextChars(10));
         }
 
         if (rnd.nextBoolean()) {
-            r.putLong(19, rnd.nextLong());
+            r.putLong(20, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDate(20, rnd.nextLong());
+            r.putDate(21, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
             rnd.nextChars(blob, blobLen / 2);
-            r.putBin(21, blob, blobLen);
+            r.putBin(22, blob, blobLen);
         }
     };
     private static final FieldGenerator BATCH6_GENERATOR = (r, rnd, ts, blob) -> {
         BATCH3_GENERATOR.generate(r, rnd, ts, blob);
 
         if (rnd.nextBoolean()) {
-            r.putShort(13, rnd.nextShort());
+            r.putShort(14, rnd.nextShort());
         }
 
         if (rnd.nextBoolean()) {
-            r.putBool(14, rnd.nextBoolean());
+            r.putBool(15, rnd.nextBoolean());
         }
 
         if (rnd.nextBoolean()) {
-            r.putByte(15, rnd.nextByte());
+            r.putByte(16, rnd.nextByte());
         }
 
         if (rnd.nextBoolean()) {
-            r.putFloat(16, rnd.nextFloat());
+            r.putFloat(17, rnd.nextFloat());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDouble(17, rnd.nextDouble());
+            r.putDouble(18, rnd.nextDouble());
         }
 
         if (rnd.nextBoolean()) {
-            r.putSym(18, rnd.nextChars(10));
+            r.putSym(19, rnd.nextChars(10));
         }
 
         if (rnd.nextBoolean()) {
-            r.putLong(19, rnd.nextLong());
+            r.putLong(20, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDate(20, rnd.nextLong());
+            r.putDate(21, rnd.nextLong());
         }
     };
     private static final RecordAssert BATCH8_ASSERTER = (r, rnd, ts, blob) -> {
@@ -925,13 +751,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (rnd.nextBoolean()) {
             Assert.assertEquals(rnd.nextLong(), r.getLong(4));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(4));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(4));
         }
 
         if (rnd.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(9));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(9));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(9));
         }
 
         assertBin(r, rnd, blob, 8);
@@ -943,75 +769,75 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(7), r.getSym(6));
+            TestUtils.assertEquals(rnd.nextChars(7), r.getSymA(6));
         } else {
-            Assert.assertNull(r.getSym(6));
+            Assert.assertNull(r.getSymA(6));
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 10);
+            assertStrColumn(rnd.nextChars(15), r, 11);
         } else {
-            assertNullStr(r, 10);
+            assertNullStr(r, 11);
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(11));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(12));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(11));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(12));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(12));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(13));
         } else {
-            Assert.assertEquals(0, r.getShort(12));
+            Assert.assertEquals(0, r.getShort(13));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(13));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(14));
         } else {
-            Assert.assertFalse(r.getBool(13));
+            Assert.assertFalse(r.getBool(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(14));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(15));
         } else {
-            Assert.assertEquals(0, r.getByte(14));
+            Assert.assertEquals(0, r.getByte(15));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(15), 0.000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(16), 0.000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(15)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(16)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(16), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(17), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(16)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(17)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(17));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(18));
         } else {
-            Assert.assertNull(r.getSym(17));
+            Assert.assertNull(r.getSymA(18));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(18));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(19));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(18));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(19));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(20));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(19));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(20));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(20));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(21));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(20));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(21));
         }
     };
     private static final RecordAssert BATCH8_9_ASSERTER = (r, rnd, ts, blob) -> {
@@ -1048,13 +874,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (rnd.nextBoolean()) {
             Assert.assertEquals(rnd.nextLong(), r.getLong(4));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(4));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(4));
         }
 
         if (rnd.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(8));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(8));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(8));
         }
 
         assertBin(r, rnd, blob, 7);
@@ -1070,72 +896,72 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 9);
+            assertStrColumn(rnd.nextChars(15), r, 10);
         } else {
-            assertNullStr(r, 9);
+            assertNullStr(r, 10);
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(10));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(11));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(10));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(11));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(11));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(12));
         } else {
-            Assert.assertEquals(0, r.getShort(11));
+            Assert.assertEquals(0, r.getShort(12));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(12));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(13));
         } else {
-            Assert.assertFalse(r.getBool(12));
+            Assert.assertFalse(r.getBool(13));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(13));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(14));
         } else {
-            Assert.assertEquals(0, r.getByte(13));
+            Assert.assertEquals(0, r.getByte(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(14), 0.000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(15), 0.000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(14)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(15)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(15), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(16), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(15)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(16)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(16));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(17));
         } else {
-            Assert.assertNull(r.getSym(16));
+            Assert.assertNull(r.getSymA(17));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(17));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(18));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(17));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(18));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(18));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(19));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(18));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(19));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(20));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(19));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(20));
         }
 
-        Assert.assertNull(r.getSym(20));
+        Assert.assertNull(r.getSymA(21));
     };
     private static final RecordAssert BATCH9_ASSERTER = (r, rnd, ts, blob) -> {
         if (rnd.nextBoolean()) {
@@ -1171,13 +997,13 @@ public class TableReaderTest extends AbstractCairoTest {
         if (rnd.nextBoolean()) {
             Assert.assertEquals(rnd.nextLong(), r.getLong(4));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(4));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(4));
         }
 
         if (rnd.nextBoolean()) {
             Assert.assertEquals(ts, r.getDate(8));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(8));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(8));
         }
 
         assertBin(r, rnd, blob, 7);
@@ -1189,75 +1015,75 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            assertStrColumn(rnd.nextChars(15), r, 9);
+            assertStrColumn(rnd.nextChars(15), r, 10);
         } else {
-            assertNullStr(r, 9);
+            assertNullStr(r, 10);
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(10));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(11));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(10));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(11));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextShort(), r.getShort(11));
+            Assert.assertEquals(rnd.nextShort(), r.getShort(12));
         } else {
-            Assert.assertEquals(0, r.getShort(11));
+            Assert.assertEquals(0, r.getShort(12));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextBoolean(), r.getBool(12));
+            Assert.assertEquals(rnd.nextBoolean(), r.getBool(13));
         } else {
-            Assert.assertFalse(r.getBool(12));
+            Assert.assertFalse(r.getBool(13));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextByte(), r.getByte(13));
+            Assert.assertEquals(rnd.nextByte(), r.getByte(14));
         } else {
-            Assert.assertEquals(0, r.getByte(13));
+            Assert.assertEquals(0, r.getByte(14));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextFloat(), r.getFloat(14), 0.000001f);
+            Assert.assertEquals(rnd.nextFloat(), r.getFloat(15), 0.000001f);
         } else {
-            Assert.assertTrue(Float.isNaN(r.getFloat(14)));
+            Assert.assertTrue(Float.isNaN(r.getFloat(15)));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextDouble(), r.getDouble(15), 0.0000001d);
+            Assert.assertEquals(rnd.nextDouble(), r.getDouble(16), 0.0000001d);
         } else {
-            Assert.assertTrue(Double.isNaN(r.getDouble(15)));
+            Assert.assertTrue(Double.isNaN(r.getDouble(16)));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(10), r.getSym(16));
+            TestUtils.assertEquals(rnd.nextChars(10), r.getSymA(17));
         } else {
-            Assert.assertNull(r.getSym(16));
+            Assert.assertNull(r.getSymA(17));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getLong(17));
+            Assert.assertEquals(rnd.nextLong(), r.getLong(18));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getLong(17));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getLong(18));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextLong(), r.getDate(18));
+            Assert.assertEquals(rnd.nextLong(), r.getDate(19));
         } else {
-            Assert.assertEquals(Numbers.LONG_NaN, r.getDate(18));
+            Assert.assertEquals(Numbers.LONG_NULL, r.getDate(19));
         }
 
         if (rnd.nextBoolean()) {
-            Assert.assertEquals(rnd.nextInt(), r.getInt(19));
+            Assert.assertEquals(rnd.nextInt(), r.getInt(20));
         } else {
-            Assert.assertEquals(Numbers.INT_NaN, r.getInt(19));
+            Assert.assertEquals(Numbers.INT_NULL, r.getInt(20));
         }
 
         if (rnd.nextBoolean()) {
-            TestUtils.assertEquals(rnd.nextChars(8), r.getSym(20));
+            TestUtils.assertEquals(rnd.nextChars(8), r.getSymA(21));
         } else {
-            Assert.assertNull(r.getSym(20));
+            Assert.assertNull(r.getSymA(21));
         }
     };
     private static final FieldGenerator BATCH8_GENERATOR = (r, rnd, ts, blob) -> {
@@ -1303,50 +1129,49 @@ public class TableReaderTest extends AbstractCairoTest {
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            r.putStr(11, rnd.nextChars(15));
+            r.putStr(12, rnd.nextChars(15));
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            r.putInt(12, rnd.nextInt());
+            r.putInt(13, rnd.nextInt());
         }
 
         if (rnd.nextBoolean()) {
-            r.putShort(13, rnd.nextShort());
+            r.putShort(14, rnd.nextShort());
         }
 
         if (rnd.nextBoolean()) {
-            r.putBool(14, rnd.nextBoolean());
+            r.putBool(15, rnd.nextBoolean());
         }
 
         if (rnd.nextBoolean()) {
-            r.putByte(15, rnd.nextByte());
+            r.putByte(16, rnd.nextByte());
         }
 
         if (rnd.nextBoolean()) {
-            r.putFloat(16, rnd.nextFloat());
+            r.putFloat(17, rnd.nextFloat());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDouble(17, rnd.nextDouble());
+            r.putDouble(18, rnd.nextDouble());
         }
 
         if (rnd.nextBoolean()) {
-            r.putSym(18, rnd.nextChars(10));
+            r.putSym(19, rnd.nextChars(10));
         }
 
         if (rnd.nextBoolean()) {
-            r.putLong(19, rnd.nextLong());
+            r.putLong(20, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDate(20, rnd.nextLong());
+            r.putDate(21, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putInt(22, rnd.nextInt());
+            r.putInt(23, rnd.nextInt());
         }
     };
-
     private static final FieldGenerator BATCH9_GENERATOR = (r, rnd, ts, blob) -> {
         if (rnd.nextBoolean()) {
             r.putByte(2, rnd.nextByte());
@@ -1387,51 +1212,51 @@ public class TableReaderTest extends AbstractCairoTest {
 
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            r.putStr(11, rnd.nextChars(15));
+            r.putStr(12, rnd.nextChars(15));
         }
 
         if ((rnd.nextPositiveInt() & 3) == 0) {
-            r.putInt(12, rnd.nextInt());
+            r.putInt(13, rnd.nextInt());
         }
 
         if (rnd.nextBoolean()) {
-            r.putShort(13, rnd.nextShort());
+            r.putShort(14, rnd.nextShort());
         }
 
         if (rnd.nextBoolean()) {
-            r.putBool(14, rnd.nextBoolean());
+            r.putBool(15, rnd.nextBoolean());
         }
 
         if (rnd.nextBoolean()) {
-            r.putByte(15, rnd.nextByte());
+            r.putByte(16, rnd.nextByte());
         }
 
         if (rnd.nextBoolean()) {
-            r.putFloat(16, rnd.nextFloat());
+            r.putFloat(17, rnd.nextFloat());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDouble(17, rnd.nextDouble());
+            r.putDouble(18, rnd.nextDouble());
         }
 
         if (rnd.nextBoolean()) {
-            r.putSym(18, rnd.nextChars(10));
+            r.putSym(19, rnd.nextChars(10));
         }
 
         if (rnd.nextBoolean()) {
-            r.putLong(19, rnd.nextLong());
+            r.putLong(20, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putDate(20, rnd.nextLong());
+            r.putDate(21, rnd.nextLong());
         }
 
         if (rnd.nextBoolean()) {
-            r.putInt(22, rnd.nextInt());
+            r.putInt(23, rnd.nextInt());
         }
 
         if (rnd.nextBoolean()) {
-            r.putSym(23, rnd.nextChars(8));
+            r.putSym(24, rnd.nextChars(8));
         }
     };
 
@@ -1443,7 +1268,7 @@ public class TableReaderTest extends AbstractCairoTest {
             AtomicInteger done = new AtomicInteger();
             AtomicInteger columnsAdded = new AtomicInteger();
             AtomicInteger reloadCount = new AtomicInteger();
-            int totalColAddCount = Os.type == Os.LINUX_ARM64 || Os.type == Os.LINUX_AMD64 ? 100 : 10;
+            int totalColAddCount = Os.isLinux() ? 100 : 10;
 
             String tableName = "tbl_meta_test";
             TableToken tableToken = createTable(tableName, PartitionBy.DAY);
@@ -1464,6 +1289,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     exceptions.add(e);
                     LOG.error().$(e).$();
                 } finally {
+                    Path.clearThreadLocals();
                     done.incrementAndGet();
                 }
             });
@@ -1475,7 +1301,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     while (colAdded < totalColAddCount) {
                         if (colAdded < (newColsAdded = columnsAdded.get())) {
                             reader.reload();
-                            Assert.assertEquals(reader.getTxnStructureVersion(), reader.getMetadata().getStructureVersion());
+                            Assert.assertEquals(reader.getTxnMetadataVersion(), reader.getMetadata().getMetadataVersion());
                             colAdded = newColsAdded;
                             reloadCount.incrementAndGet();
                         }
@@ -1484,6 +1310,8 @@ public class TableReaderTest extends AbstractCairoTest {
                 } catch (Throwable e) {
                     exceptions.add(e);
                     LOG.error().$(e).$();
+                } finally {
+                    Path.clearThreadLocals();
                 }
             });
             writerThread.start();
@@ -1492,7 +1320,7 @@ public class TableReaderTest extends AbstractCairoTest {
             writerThread.join();
             readerThread.join();
 
-            if (exceptions.size() != 0) {
+            if (!exceptions.isEmpty()) {
                 for (Throwable ex : exceptions) {
                     ex.printStackTrace();
                 }
@@ -1542,6 +1370,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     LOG.error().$(e).$();
                 } finally {
                     done.incrementAndGet();
+                    Path.clearThreadLocals();
                 }
             });
 
@@ -1552,7 +1381,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     while (colAdded < totalColAddCount) {
                         if (colAdded < columnsAdded.get()) {
                             if (reader.reload()) {
-                                Assert.assertEquals(reader.getTxnStructureVersion(), reader.getMetadata().getStructureVersion());
+                                Assert.assertEquals(reader.getTxnMetadataVersion(), reader.getMetadata().getMetadataVersion());
                                 colAdded = reader.getMetadata().getColumnCount();
                                 reloadCount.incrementAndGet();
                             }
@@ -1562,6 +1391,8 @@ public class TableReaderTest extends AbstractCairoTest {
                 } catch (Throwable e) {
                     exceptions.add(e);
                     LOG.error().$(e).$();
+                } finally {
+                    Path.clearThreadLocals();
                 }
             });
             writerThread.start();
@@ -1570,7 +1401,7 @@ public class TableReaderTest extends AbstractCairoTest {
             writerThread.join();
             readerThread.join();
 
-            if (exceptions.size() != 0) {
+            if (!exceptions.isEmpty()) {
                 Throwable ex = exceptions.poll();
                 ex.printStackTrace();
                 throw new Exception(ex);
@@ -1587,7 +1418,7 @@ public class TableReaderTest extends AbstractCairoTest {
             AtomicInteger done = new AtomicInteger();
             AtomicInteger columnsAdded = new AtomicInteger();
             AtomicInteger reloadCount = new AtomicInteger();
-            int totalColAddCount = Os.type == Os.LINUX_AMD64 || Os.type == Os.LINUX_ARM64 ? 500 : 50;
+            int totalColAddCount = Os.isLinux() ? 500 : 50;
 
             String tableName = "tbl_meta_test";
             TableToken tableToken = createTable(tableName, PartitionBy.HOUR);
@@ -1618,6 +1449,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     LOG.error().$(e).$();
                 } finally {
                     done.incrementAndGet();
+                    Path.clearThreadLocals();
                 }
             });
 
@@ -1628,7 +1460,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     while (colAdded < totalColAddCount) {
                         if (colAdded < (newColsAdded = columnsAdded.get())) {
                             try (TableReader reader = getReader(tableToken)) {
-                                Assert.assertEquals(reader.getTxnStructureVersion(), reader.getMetadata().getStructureVersion());
+                                Assert.assertEquals(reader.getTxnMetadataVersion(), reader.getMetadata().getMetadataVersion());
                                 colAdded = newColsAdded;
                                 reloadCount.incrementAndGet();
                             }
@@ -1639,6 +1471,8 @@ public class TableReaderTest extends AbstractCairoTest {
                 } catch (Throwable e) {
                     exceptions.add(e);
                     LOG.error().$(e).$();
+                } finally {
+                    Path.clearThreadLocals();
                 }
             });
             writerThread.start();
@@ -1650,50 +1484,213 @@ public class TableReaderTest extends AbstractCairoTest {
             LOG.infoW().$("total reload count ").$(reloadCount.get()).$();
         });
 
-        if (exceptions.size() != 0) {
+        if (!exceptions.isEmpty()) {
             throw exceptions.poll();
         }
     }
 
     @Test
     public void testAppendNullTimestamp() throws Exception {
-        try (TableModel model = new TableModel(configuration, "all", PartitionBy.NONE)
-                .col("int", ColumnType.INT)
+        TableModel model = new TableModel(configuration, "all", PartitionBy.NONE)
+                .col("int", ColumnType.INT);
 //                .timestamp("t") // cannot insert null as a timestamp on designated columns
-        ) {
-            CreateTableTestUtils.createTableWithVersionAndId(model, engine, ColumnType.VERSION, 1);
+        CreateTableTestUtils.createTableWithVersionAndId(model, engine, ColumnType.VERSION, 1);
 
-            TestUtils.assertMemoryLeak(() -> {
-                try (TableWriter w = newTableWriter(configuration, "all", metrics)) {
-                    TableWriter.Row r = w.newRow(Numbers.LONG_NaN);
-                    r.putInt(0, 100);
-                    r.append();
-                    w.commit();
+        assertMemoryLeak(() -> {
+            try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
+                TableWriter.Row r = writer.newRow(Numbers.LONG_NULL);
+                r.putInt(0, 100);
+                r.append();
+                writer.commit();
 
-                    Assert.assertEquals(1, w.size());
+                Assert.assertEquals(1, writer.size());
+            }
+
+            try (TableReader reader = newOffPoolReader(configuration, "all")) {
+                Assert.assertEquals(1, reader.getPartitionCount());
+                Assert.assertEquals(1, reader.openPartition(0));
+            }
+        });
+    }
+
+    @Test
+    public void testAsyncRemoveAndReloadSymRetried() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        String columnName = "b";
+        String suffix = "";
+        TestFilesFacade ff = new TestFilesFacade() {
+            @Override
+            public int called() {
+                return counterRef.get();
+            }
+
+            @Override
+            public boolean removeQuiet(LPSZ name) {
+                if (Utf8s.endsWithAscii(name, columnName + ".v" + suffix)) {
+                    if (counterRef.get() == CANNOT_DELETE) {
+                        return false;
+                    }
+                    counterRef.incrementAndGet();
                 }
+                return super.removeQuiet(name);
+            }
 
-                try (TableReader reader = newTableReader(configuration, "all")) {
-                    Assert.assertEquals(1, reader.getPartitionCount());
-                    Assert.assertEquals(1, reader.openPartition(0));
+            @Override
+            public boolean wasCalled() {
+                return counterRef.get() > 0;
+            }
+        };
+
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                            .col("a", ColumnType.SYMBOL)
+                            .col("b", ColumnType.SYMBOL);
+                    AbstractCairoTest.create(model);
+
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
+
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
+
+                        try (
+                                TableReader reader = newOffPoolReader(configuration, "x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
+
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
+
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn("b", ColumnType.SYMBOL);
+
+                            // SymbolMap must be cleared when we try to do add values to new column
+                            appendTwoSymbols(writer, rnd, 2);
+                            writer.commit();
+
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
+
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getSymA(1));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                }
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N * 2, counter);
+                        }
+                    }
+
+                    Assert.assertFalse(ff.wasCalled());
+                    try (ColumnPurgeJob job = new ColumnPurgeJob(engine)) {
+                        job.run(0);
+                    }
+
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 1);
                 }
-            });
+        );
+    }
+
+    @Test
+    public void testAsyncRemoveLastSym() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
+
+        // create table with two string columns
+        TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                .col("a", ColumnType.SYMBOL)
+                .col("b", ColumnType.SYMBOL);
+        AbstractCairoTest.create(model);
+
+        testRemoveSymbol(counterRef, ff, "b", 2);
+    }
+
+    @Test
+    public void testAsyncRemoveLastSymWithColTop() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "c", ".0");
+
+        // create table with two string columns
+        TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                .col("a", ColumnType.SYMBOL)
+                .col("b", ColumnType.SYMBOL);
+        AbstractCairoTest.create(model);
+
+        try (TableWriter tw = getWriter("x")) {
+            tw.addColumn("c", ColumnType.SYMBOL);
         }
+        engine.releaseInactive();
+        testRemoveSymbol(counterRef, ff, "c", 6);
+    }
+
+    @Test
+    public void testAsyncSymbolRename() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
+
+        // create table with two string columns
+        TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                .col("a", ColumnType.SYMBOL)
+                .col("b", ColumnType.SYMBOL);
+        AbstractCairoTest.create(model);
+        testAsyncColumnRename(counterRef, ff, "b");
+    }
+
+    @Test
+    public void testAsyncSymbolRenameWithNameVersion() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "c", ".0");
+
+        // create table with two string columns
+        TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                .col("a", ColumnType.SYMBOL)
+                .col("b", ColumnType.SYMBOL);
+        AbstractCairoTest.create(model);
+        try (TableWriter tw = getWriter("x")) {
+            tw.addColumn("c", ColumnType.SYMBOL);
+        }
+        engine.releaseInactive();
+
+        testAsyncColumnRename(counterRef, ff, "c");
     }
 
     @Test
     public void testCharAsString() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
-
-            try (TableModel model = new TableModel(
+            TableModel model = new TableModel(
                     configuration,
                     "char_test",
                     PartitionBy.NONE
-            ).col("cc", ColumnType.STRING)) {
-                CreateTableTestUtils.create(model);
-            }
+            ).col("cc", ColumnType.STRING);
+            AbstractCairoTest.create(model);
             char[] data = {'a', 'b', 'f', 'g'};
-            try (TableWriter writer = newTableWriter(configuration, "char_test", metrics)) {
+            try (TableWriter writer = newOffPoolWriter(configuration, "char_test")) {
 
                 for (int i = 0, n = data.length; i < n; i++) {
                     TableWriter.Row r = writer.newRow();
@@ -1703,49 +1700,22 @@ public class TableReaderTest extends AbstractCairoTest {
                 writer.commit();
             }
 
-            try (TableReader reader = newTableReader(configuration, "char_test")) {
-                final RecordCursor cursor = reader.getCursor();
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "char_test");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 final Record record = cursor.getRecord();
                 int index = 0;
                 while (cursor.hasNext()) {
                     Assert.assertTrue(index < data.length);
-                    CharSequence value = record.getStr(0);
+                    CharSequence value = record.getStrA(0);
+                    Assert.assertNotNull(value);
                     Assert.assertEquals(1, value.length());
                     Assert.assertEquals(data[index], value.charAt(0));
                     index++;
                 }
             }
         });
-    }
-
-    @Test
-    public void testCloseColumnNonPartitioned1() throws Exception {
-        testCloseColumn(PartitionBy.NONE, 2000, 6000L, "bin", BATCH1_ASSERTER_NULL_BIN);
-    }
-
-    @Test
-    public void testCloseColumnNonPartitioned2() throws Exception {
-        testCloseColumn(PartitionBy.NONE, 2000, 6000L, "int", BATCH1_ASSERTER_NULL_INT);
-    }
-
-    @Test
-    public void testCloseColumnNonPartitioned3() throws Exception {
-        testCloseColumn(PartitionBy.NONE, 2000, 6000L, "sym", BATCH1_ASSERTER_NULL_SYM);
-    }
-
-    @Test
-    public void testCloseColumnPartitioned1() throws Exception {
-        testCloseColumn(PartitionBy.DAY, 1000, 60000L, "bin", BATCH1_ASSERTER_NULL_BIN);
-    }
-
-    @Test
-    public void testCloseColumnPartitioned2() throws Exception {
-        testCloseColumn(PartitionBy.DAY, 1000, 60000L, "int", BATCH1_ASSERTER_NULL_INT);
-    }
-
-    @Test
-    public void testCloseColumnPartitioned3() throws Exception {
-        testCloseColumn(PartitionBy.DAY, 1000, 60000L, "sym", BATCH1_ASSERTER_NULL_SYM);
     }
 
     @Test
@@ -1790,20 +1760,19 @@ public class TableReaderTest extends AbstractCairoTest {
             }
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG)) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG);
+            AbstractCairoTest.create(model);
 
             final int threads = 2;
             final CyclicBarrier startBarrier = new CyclicBarrier(threads);
-            final CountDownLatch stopLatch = new CountDownLatch(threads);
+            final SOCountDownLatch stopLatch = new SOCountDownLatch(threads);
             final AtomicInteger errors = new AtomicInteger(0);
 
             // start writer
             new Thread(() -> {
                 try {
                     startBarrier.await();
-                    try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+                    try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                         for (int i = 0; i < N * scale; i++) {
                             TableWriter.Row row = writer.newRow();
                             row.putLong(0, list.getQuick(i % N));
@@ -1823,8 +1792,10 @@ public class TableReaderTest extends AbstractCairoTest {
             new Thread(() -> {
                 try {
                     startBarrier.await();
-                    try (TableReader reader = newTableReader(configuration, "w")) {
-                        RecordCursor cursor = reader.getCursor();
+                    try (
+                            TableReader reader = newOffPoolReader(configuration, "w");
+                            TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                    ) {
                         final Record record = cursor.getRecord();
                         do {
                             // we deliberately ignore result of reload()
@@ -1849,7 +1820,7 @@ public class TableReaderTest extends AbstractCairoTest {
                 }
             }).start();
 
-            Assert.assertTrue(stopLatch.await(30, TimeUnit.SECONDS));
+            stopLatch.await();
             Assert.assertEquals(0, errors.get());
         });
     }
@@ -1860,34 +1831,37 @@ public class TableReaderTest extends AbstractCairoTest {
         // this caused TableWriter to incorrectly calculate append position in constructor
         // subsequent records would have been appended to far away from records from first writer instance
         // and table reader would not be able to read data consistently
-        TestUtils.assertMemoryLeak(() -> {
+        assertMemoryLeak(() -> {
             // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.LONG256)) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.LONG256);
+            AbstractCairoTest.create(model);
 
-            try (TableWriter w = newTableWriter(configuration, "x", metrics)) {
-                TableWriter.Row r = w.newRow();
+            try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
+                TableWriter.Row r = writer.newRow();
                 r.putLong256(0, 1, 2, 3, 4);
                 r.append();
-                w.commit();
+                writer.commit();
             }
 
-            try (TableWriter w = newTableWriter(configuration, "x", metrics)) {
-                TableWriter.Row r = w.newRow();
+            try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
+                TableWriter.Row r = writer.newRow();
                 r.putLong256(0, 5, 6, 7, 8);
                 r.append();
-                w.commit();
+                writer.commit();
             }
 
-            try (TableReader r = newTableReader(configuration, "x")) {
-                sink.clear();
-                printer.print(r.getCursor(), r.getMetadata(), true, sink);
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "x");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
+                println(reader.getMetadata(), cursor);
             }
 
-            TestUtils.assertEquals("a\n" +
-                    "0x04000000000000000300000000000000020000000000000001\n" +
-                    "0x08000000000000000700000000000000060000000000000005\n", sink);
+            TestUtils.assertEquals(
+                    "a\n" +
+                            "0x04000000000000000300000000000000020000000000000001\n" +
+                            "0x08000000000000000700000000000000060000000000000005\n", sink
+            );
         });
     }
 
@@ -1898,9 +1872,9 @@ public class TableReaderTest extends AbstractCairoTest {
 
         assertMemoryLeak(() -> {
             try (TableReader reader = getReader(tableToken)) {
-                int partitionsToAdd = Os.type == Os.LINUX_ARM64 || Os.type == Os.LINUX_AMD64 ? (int) (Files.PAGE_SIZE / Long.BYTES / 4) + 1 : 10;
+                int partitionsToAdd = Os.isLinux() ? (int) (Files.PAGE_SIZE / Long.BYTES / 4) + 1 : 10;
                 try (TableWriter writer = getWriter(tableToken)) {
-                    int symbolsToAdd = Os.type == Os.LINUX_ARM64 || Os.type == Os.LINUX_AMD64 ? (int) (Files.PAGE_SIZE / Long.BYTES / 4) + 1 : 10;
+                    int symbolsToAdd = Os.isLinux() ? (int) (Files.PAGE_SIZE / Long.BYTES / 4) + 1 : 10;
                     for (int i = 0; i < symbolsToAdd; i++) {
                         writer.addColumn("col" + i, ColumnType.SYMBOL);
                     }
@@ -1920,17 +1894,18 @@ public class TableReaderTest extends AbstractCairoTest {
     public void testMetadataFileDoesNotExist() throws Exception {
         String tableName = "testMetadataFileDoesNotExist";
         TableToken tableToken = createTable(tableName, PartitionBy.HOUR);
+        node1.setProperty(PropertyKey.CAIRO_SPIN_LOCK_TIMEOUT, 10);
         spinLockTimeout = 10;
         AtomicInteger openCount = new AtomicInteger(1000);
 
         assertMemoryLeak(() -> {
             try (Path temp = new Path()) {
-                temp.of(engine.getConfiguration().getRoot()).concat("dummy_non_existing_path").$();
+                temp.of(engine.getConfiguration().getDbRoot()).concat("dummy_non_existing_path");
                 ff = new TestFilesFacadeImpl() {
                     @Override
-                    public int openRO(LPSZ name) {
-                        if (Chars.endsWith(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
-                            return TestFilesFacadeImpl.INSTANCE.openRO(temp);
+                    public long openRO(LPSZ name) {
+                        if (Utf8s.endsWithAscii(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
+                            return TestFilesFacadeImpl.INSTANCE.openRO(temp.$());
                         }
                         return TestFilesFacadeImpl.INSTANCE.openRO(name);
                     }
@@ -1942,6 +1917,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     }
                     engine.releaseAllWriters();
                     try {
+                        spinLockTimeout = 100;
                         openCount.set(0);
                         reader.reload();
                         Assert.fail();
@@ -1957,35 +1933,35 @@ public class TableReaderTest extends AbstractCairoTest {
     public void testMetadataFileDoesNotExist2() throws Exception {
         String tableName = "testMetadataFileDoesNotExist";
         TableToken tableToken = createTable(tableName, PartitionBy.HOUR);
+        node1.setProperty(PropertyKey.CAIRO_SPIN_LOCK_TIMEOUT, 10);
         spinLockTimeout = 10;
         AtomicInteger openCount = new AtomicInteger(1000);
 
         assertMemoryLeak(() -> {
             try (Path temp = new Path()) {
-                temp.of(engine.getConfiguration().getRoot()).concat("dummy_non_existing_path").$();
+                temp.of(engine.getConfiguration().getDbRoot()).concat("dummy_non_existing_path").$();
                 ff = new TestFilesFacadeImpl() {
-                    int metaFd = -1;
 
                     @Override
-                    public long length(int fd) {
-                        if (fd == metaFd) {
-                            return Files.length(temp);
+                    public long length(long fd) {
+                        if (fd == this.fd) {
+                            return Files.length(temp.$());
                         }
                         return Files.length(fd);
                     }
 
                     @Override
                     public long length(LPSZ name) {
-                        if (Chars.endsWith(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
-                            return Files.length(temp);
+                        if (Utf8s.endsWithAscii(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
+                            return Files.length(temp.$());
                         }
                         return Files.length(name);
                     }
 
                     @Override
-                    public int openRO(LPSZ name) {
-                        if (Chars.endsWith(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
-                            return metaFd = TestFilesFacadeImpl.INSTANCE.openRO(name);
+                    public long openRO(LPSZ name) {
+                        if (Utf8s.endsWithAscii(name, TableUtils.META_FILE_NAME) && openCount.decrementAndGet() < 0) {
+                            return this.fd = TestFilesFacadeImpl.INSTANCE.openRO(name);
                         }
                         return TestFilesFacadeImpl.INSTANCE.openRO(name);
                     }
@@ -1996,6 +1972,8 @@ public class TableReaderTest extends AbstractCairoTest {
                         writer.addColumn("col10", ColumnType.SYMBOL);
                     }
                     engine.releaseAllWriters();
+                    // minimise time we spend opening metadata that cannot be opened.
+                    spinLockTimeout = 100;
                     try {
                         openCount.set(0);
                         reader.reload();
@@ -2012,6 +1990,7 @@ public class TableReaderTest extends AbstractCairoTest {
     public void testMetadataVersionDoesNotMatch() throws Exception {
         String tableName = "testMetadataVersionDoesNotMatch";
         TableToken tableToken = createTable(tableName, PartitionBy.HOUR);
+        node1.setProperty(PropertyKey.CAIRO_SPIN_LOCK_TIMEOUT, 10);
         spinLockTimeout = 10;
 
         assertMemoryLeak(() -> {
@@ -2021,19 +2000,20 @@ public class TableReaderTest extends AbstractCairoTest {
                 }
                 try (
                         Path path = getPath(tableName);
-                        MemoryMARW mem = Vm.getMARWInstance(
+                        MemoryMARW mem = Vm.getCMARWInstance(
                                 TestFilesFacadeImpl.INSTANCE,
-                                path,
+                                path.$(),
                                 -1,
                                 Files.PAGE_SIZE,
                                 MemoryTag.NATIVE_DEFAULT,
                                 configuration.getWriterFileOpenOpts()
                         )
                 ) {
-                    mem.putLong(TableUtils.META_OFFSET_STRUCTURE_VERSION, 0);
+                    mem.putLong(TableUtils.META_OFFSET_METADATA_VERSION, 0);
                 }
 
                 try {
+                    spinLockTimeout = 100;
                     reader.reload();
                     Assert.fail();
                 } catch (CairoException ex) {
@@ -2052,31 +2032,33 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testNullValueRecovery() throws Exception {
-        final String expected = "int\tshort\tbyte\tdouble\tfloat\tlong\tstr\tsym\tbool\tbin\tdate\n" +
-                "NaN\t0\t0\tNaN\tNaN\tNaN\t\tabc\ttrue\t\t\n";
+        final String expected = "int\tshort\tbyte\tdouble\tfloat\tlong\tstr\tsym\tbool\tbin\tdate\tvarchar\n" +
+                "null\t0\t0\tnull\tnull\tnull\t\tabc\ttrue\t\t\t\n";
 
         TestUtils.assertMemoryLeak(() -> {
             CreateTableTestUtils.createAllTable(engine, PartitionBy.NONE);
 
-            try (TableWriter w = newTableWriter(configuration, "all", metrics)) {
-                TableWriter.Row r = w.newRow(1000000); // <-- higher timestamp
+            try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
+                TableWriter.Row r = writer.newRow(1000000); // <-- higher timestamp
                 r.putInt(0, 10);
                 r.putByte(1, (byte) 56);
                 r.putDouble(2, 4.3223);
                 r.putStr(6, "xyz");
                 r.cancel();
 
-                r = w.newRow(100000); // <-- lower timestamp
+                r = writer.newRow(100000); // <-- lower timestamp
                 r.putSym(7, "abc");
                 r.putBool(8, true);
                 r.append();
 
-                w.commit();
+                writer.commit();
             }
 
-            try (TableReader r = newTableReader(configuration, "all")) {
-                sink.clear();
-                printer.print(r.getCursor(), r.getMetadata(), true, sink);
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "all");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
+                println(reader.getMetadata(), cursor);
                 TestUtils.assertEquals(expected, sink);
             }
         });
@@ -2085,14 +2067,13 @@ public class TableReaderTest extends AbstractCairoTest {
     @Test
     public void testOver2GFile() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
-                    .col("a", ColumnType.LONG)) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                    .col("a", ColumnType.LONG);
+            AbstractCairoTest.create(model);
 
             long N = 280000000;
             Rnd rnd = new Rnd();
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
+            try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
                 for (int i = 0; i < N; i++) {
                     TableWriter.Row r = writer.newRow();
                     r.putLong(0, rnd.nextLong());
@@ -2101,10 +2082,12 @@ public class TableReaderTest extends AbstractCairoTest {
                 writer.commit();
             }
 
-            try (TableReader reader = newTableReader(configuration, "x")) {
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "x");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 int count = 0;
                 rnd.reset();
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 while (cursor.hasNext()) {
                     Assert.assertEquals(rnd.nextLong(), record.getLong(0));
@@ -2120,7 +2103,7 @@ public class TableReaderTest extends AbstractCairoTest {
         CreateTableTestUtils.createAllTable(engine, PartitionBy.NONE);
         int N = 10000;
         Rnd rnd = new Rnd();
-        try (TableWriter writer = newTableWriter(configuration, "all", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
             int col = writer.getMetadata().getColumnIndex("str");
             for (int i = 0; i < N; i++) {
                 TableWriter.Row r = writer.newRow();
@@ -2142,14 +2125,17 @@ public class TableReaderTest extends AbstractCairoTest {
 
             rnd.reset();
 
-            try (TableReader reader = newTableReader(configuration, "all")) {
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "all");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 col = reader.getMetadata().getColumnIndex("str");
                 int count = 0;
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 while (cursor.hasNext()) {
                     CharSequence expected = rnd.nextChars(15);
-                    CharSequence actual = record.getStr(col);
+                    CharSequence actual = record.getStrA(col);
+                    Assert.assertNotNull(actual);
                     Assert.assertTrue(Chars.equals(expected, 2, 10, actual, 0, 8));
                     count++;
                 }
@@ -2186,18 +2172,22 @@ public class TableReaderTest extends AbstractCairoTest {
     public void testReadEmptyTable() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
             CreateTableTestUtils.createAllTable(engine, PartitionBy.NONE);
-            try (TableWriter ignored1 = newTableWriter(configuration, "all", metrics)) {
+            try (TableWriter ignored1 = newOffPoolWriter(configuration, "all")) {
 
                 // open another writer, which should fail
                 try {
-                    newTableWriter(configuration, "all", metrics);
-                    Assert.fail();
+                    try (TableWriter ignore = newOffPoolWriter(configuration, "all")) {
+                        Assert.fail();
+                    }
                 } catch (CairoException ignored) {
 
                 }
 
-                try (TableReader reader = newTableReader(configuration, "all")) {
-                    Assert.assertFalse(reader.getCursor().hasNext());
+                try (
+                        TableReader reader = newOffPoolReader(configuration, "all");
+                        TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                ) {
+                    Assert.assertFalse(cursor.hasNext());
                 }
             }
         });
@@ -2205,14 +2195,13 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testReadLong256Four() {
-        try (TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp()) {
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp();
+        AbstractCairoTest.create(model);
 
         final int N = 1_000_000;
         final Rnd rnd = new Rnd();
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
             for (int i = 0; i < N; i++) {
                 TableWriter.Row row = writer.newRow(timestamp);
                 row.putLong256(0, "0x" + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()));
@@ -2223,8 +2212,10 @@ public class TableReaderTest extends AbstractCairoTest {
 
         rnd.reset();
         final StringSink sink = new StringSink();
-        try (TableReader reader = newTableReader(configuration, "w")) {
-            final RecordCursor cursor = reader.getCursor();
+        try (
+                TableReader reader = newOffPoolReader(configuration, "w");
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             final Record record = cursor.getRecord();
             int count = 0;
             while (cursor.hasNext()) {
@@ -2239,14 +2230,13 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testReadLong256One() {
-        try (TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp()) {
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp();
+        AbstractCairoTest.create(model);
 
         final int N = 1_000_000;
         final Rnd rnd = new Rnd();
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
             for (int i = 0; i < N; i++) {
                 TableWriter.Row row = writer.newRow(timestamp);
                 row.putLong256(0, "0x" + padHexLong(rnd.nextLong()));
@@ -2257,8 +2247,10 @@ public class TableReaderTest extends AbstractCairoTest {
 
         rnd.reset();
         final StringSink sink = new StringSink();
-        try (TableReader reader = newTableReader(configuration, "w")) {
-            final RecordCursor cursor = reader.getCursor();
+        try (
+                TableReader reader = newOffPoolReader(configuration, "w");
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             final Record record = cursor.getRecord();
             int count = 0;
             while (cursor.hasNext()) {
@@ -2273,14 +2265,13 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testReadLong256Three() {
-        try (TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp()) {
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp();
+        AbstractCairoTest.create(model);
 
         final int N = 1_000_000;
         final Rnd rnd = new Rnd();
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
             for (int i = 0; i < N; i++) {
                 TableWriter.Row row = writer.newRow(timestamp);
                 row.putLong256(0, "0x" + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()));
@@ -2291,8 +2282,10 @@ public class TableReaderTest extends AbstractCairoTest {
 
         rnd.reset();
         final StringSink sink = new StringSink();
-        try (TableReader reader = newTableReader(configuration, "w")) {
-            final RecordCursor cursor = reader.getCursor();
+        try (
+                TableReader reader = newOffPoolReader(configuration, "w");
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             final Record record = cursor.getRecord();
             int count = 0;
             while (cursor.hasNext()) {
@@ -2307,14 +2300,13 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testReadLong256Two() {
-        try (TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp()) {
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG256).timestamp();
+        AbstractCairoTest.create(model);
 
         final int N = 1_000_000;
         final Rnd rnd = new Rnd();
         long timestamp = 0;
-        try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
             for (int i = 0; i < N; i++) {
                 TableWriter.Row row = writer.newRow(timestamp);
                 row.putLong256(0, "0x" + padHexLong(rnd.nextLong()) + padHexLong(rnd.nextLong()));
@@ -2325,8 +2317,10 @@ public class TableReaderTest extends AbstractCairoTest {
 
         rnd.reset();
         final StringSink sink = new StringSink();
-        try (TableReader reader = newTableReader(configuration, "w")) {
-            final RecordCursor cursor = reader.getCursor();
+        try (
+                TableReader reader = newOffPoolReader(configuration, "w");
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             final Record record = cursor.getRecord();
             int count = 0;
             while (cursor.hasNext()) {
@@ -2348,23 +2342,22 @@ public class TableReaderTest extends AbstractCairoTest {
     @Test
     public void testReaderAndWriterRace() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
+            TableModel model = new TableModel(configuration, "x", PartitionBy.NONE);
+            AbstractCairoTest.create(model.timestamp());
 
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)) {
-                CreateTableTestUtils.create(model.timestamp());
-            }
-
-            CountDownLatch stopLatch = new CountDownLatch(2);
+            SOCountDownLatch stopLatch = new SOCountDownLatch(2);
             CyclicBarrier barrier = new CyclicBarrier(2);
             int count = 1000000;
             AtomicInteger reloadCount = new AtomicInteger(0);
+            AtomicInteger errorCount = new AtomicInteger(0);
 
             try (
-                    TableWriter writer = newTableWriter(configuration, "x", metrics);
-                    TableReader reader = newTableReader(configuration, "x")
+                    TableWriter writer = newOffPoolWriter(configuration, "x");
+                    TableReader reader = newOffPoolReader(configuration, "x")
             ) {
                 new Thread(() -> {
                     try {
-                        barrier.await();
+                        TestUtils.await(barrier);
                         for (int i = 0; i < count; i++) {
                             TableWriter.Row row = writer.newRow(i);
                             row.append();
@@ -2372,6 +2365,7 @@ public class TableReaderTest extends AbstractCairoTest {
                         }
                     } catch (Exception e) {
                         e.printStackTrace();
+                        errorCount.incrementAndGet();
                     } finally {
                         stopLatch.countDown();
                     }
@@ -2382,22 +2376,24 @@ public class TableReaderTest extends AbstractCairoTest {
                     try {
                         barrier.await();
                         int max = 0;
-                        RecordCursor cursor = reader.getCursor();
-                        while (max < count) {
-                            if (reader.reload()) {
-                                reloadCount.incrementAndGet();
-                                cursor.toTop();
-                                int localCount = 0;
-                                while (cursor.hasNext()) {
-                                    localCount++;
-                                }
-                                if (localCount > max) {
-                                    max = localCount;
+                        try (TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)) {
+                            while (max < count) {
+                                if (reader.reload()) {
+                                    reloadCount.incrementAndGet();
+                                    cursor.toTop();
+                                    int localCount = 0;
+                                    while (cursor.hasNext()) {
+                                        localCount++;
+                                    }
+                                    if (localCount > max) {
+                                        max = localCount;
+                                    }
                                 }
                             }
                         }
                     } catch (Exception e) {
                         e.printStackTrace();
+                        errorCount.incrementAndGet();
                     } finally {
                         stopLatch.countDown();
                     }
@@ -2406,6 +2402,7 @@ public class TableReaderTest extends AbstractCairoTest {
                 stopLatch.await();
 
                 Assert.assertTrue(reloadCount.get() > 0);
+                Assert.assertEquals(0, errorCount.get());
             }
         });
     }
@@ -2414,27 +2411,25 @@ public class TableReaderTest extends AbstractCairoTest {
     public void testReaderGoesToPoolWhenCommitHappen() throws Exception {
         assertMemoryLeak(() -> {
             String tableName = "testReaderGoesToPoolWhenCommitHappen";
-            try (TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY).col("l", ColumnType.LONG)) {
-                TableToken tableToken = CreateTableTestUtils.create(model);
+            TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY).col("l", ColumnType.LONG);
+            TableToken tableToken = AbstractCairoTest.create(model);
 
-                int rowCount = 10;
-                try (TableWriter writer = newTableWriter(configuration, tableName, metrics)) {
-                    try (TableReader ignore = getReader(tableToken)) {
-                        for (int i = 0; i < rowCount; i++) {
-                            TableWriter.Row row = writer.newRow();
-                            row.putLong(0, i);
-                            row.append();
-                        }
-                        writer.commit();
+            int rowCount = 10;
+            try (TableWriter writer = newOffPoolWriter(configuration, tableName)) {
+                try (TableReader ignore = getReader(tableToken)) {
+                    for (int i = 0; i < rowCount; i++) {
+                        TableWriter.Row row = writer.newRow();
+                        row.putLong(0, i);
+                        row.append();
                     }
-                }
-
-                try (TableReader reader = getReader(tableToken)) {
-                    Assert.assertEquals(rowCount, reader.size());
+                    writer.commit();
                 }
             }
-        });
 
+            try (TableReader reader = getReader(tableToken)) {
+                Assert.assertEquals(rowCount, reader.size());
+            }
+        });
     }
 
     @Test
@@ -2444,13 +2439,12 @@ public class TableReaderTest extends AbstractCairoTest {
         final long tsStep = Timestamps.SECOND_MICROS;
         final int rows = expectedPartitions * 60 * 60;
 
-        maxOpenPartitions = openPartitionsLimit;
+        node1.setProperty(PropertyKey.CAIRO_INACTIVE_READER_MAX_OPEN_PARTITIONS, openPartitionsLimit);
 
-        try (TableModel model = new TableModel(configuration, "x", PartitionBy.HOUR).col("i", ColumnType.INT).timestamp()) {
-            TestUtils.create(model, engine);
-        }
+        TableModel model = new TableModel(configuration, "x", PartitionBy.HOUR).col("i", ColumnType.INT).timestamp();
+        TestUtils.createTable(engine, model);
 
-        try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
             for (int i = 0; i < rows; i++) {
                 TableWriter.Row row = writer.newRow(i * tsStep);
                 row.putInt(0, i);
@@ -2459,12 +2453,14 @@ public class TableReaderTest extends AbstractCairoTest {
             writer.commit();
         }
 
-        try (TableReader reader = newTableReader(configuration, "x")) {
+        try (
+                TableReader reader = newOffPoolReader(configuration, "x");
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             Assert.assertEquals(expectedPartitions, reader.getPartitionCount());
             Assert.assertEquals(0, reader.getOpenPartitionCount());
             assertOpenPartitionCount(reader);
 
-            final RecordCursor cursor = reader.getCursor();
             final Record record = cursor.getRecord();
             int count = 0;
             while (cursor.hasNext()) {
@@ -2495,42 +2491,40 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testReaderReloadWhenColumnAddedBeforeTheData() throws Exception {
-        assertMemoryLeak(
-                () -> {
-                    // model table
-                    try (TableModel model = new TableModel(configuration, "w", PartitionBy.HOUR).col("l", ColumnType.LONG).timestamp()) {
-                        CreateTableTestUtils.create(model);
-                    }
+        assertMemoryLeak(() -> {
+            // model table
+            TableModel model = new TableModel(configuration, "w", PartitionBy.HOUR).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-                    try (
-                            TableWriter w = newTableWriter(configuration, "w", metrics);
-                            TableReader r = newTableReader(configuration, "w")
-                    ) {
-                        // Create and cancel row to ensure partition entry and NULL max timestamp
-                        // this used to trigger a problem with very last reload of the reader.
-                        w.newRow(TimestampFormatUtils.parseTimestamp("2016-03-02T10:00:00.000000Z")).cancel();
+            try (
+                    TableWriter writer = newOffPoolWriter(configuration, "w");
+                    TableReader reader = newOffPoolReader(configuration, "w");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
+                // Create and cancel row to ensure partition entry and NULL max timestamp
+                // this used to trigger a problem with very last reload of the reader.
+                writer.newRow(TimestampFormatUtils.parseTimestamp("2016-03-02T10:00:00.000000Z")).cancel();
 
-                        // before adding any data add column
-                        w.addColumn("xyz", ColumnType.SYMBOL);
+                // before adding any data add column
+                writer.addColumn("xyz", ColumnType.SYMBOL);
 
-                        Assert.assertTrue(r.reload());
+                Assert.assertTrue(reader.reload());
 
-                        TableWriter.Row row = w.newRow(TimestampFormatUtils.parseTimestamp("2016-03-02T10:00:00.000000Z"));
-                        row.append();
-                        w.commit();
+                TableWriter.Row row = writer.newRow(TimestampFormatUtils.parseTimestamp("2016-03-02T10:00:00.000000Z"));
+                row.append();
+                writer.commit();
 
-                        Assert.assertTrue(r.reload());
+                Assert.assertTrue(reader.reload());
 
-                        sink.clear();
-                        TestUtils.printer.print(r.getCursor(), r.getMetadata(), true, sink);
-                        TestUtils.assertEquals(
-                                "l\ttimestamp\txyz\n" +
-                                        "NaN\t2016-03-02T10:00:00.000000Z\t\n",
-                                sink
-                        );
-                    }
-                }
-        );
+                cursor.toTop();
+                println(reader.getMetadata(), cursor);
+                TestUtils.assertEquals(
+                        "l\ttimestamp\txyz\n" +
+                                "null\t2016-03-02T10:00:00.000000Z\t\n",
+                        sink
+                );
+            }
+        });
     }
 
     @Test
@@ -2579,23 +2573,24 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     @Test
-    public void testReloadWithTrailingNullString() throws NumericException {
+    public void testReloadWithTrailingNullString() throws Exception {
         final String tableName = "reload_test";
-        try (TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)) {
-            model.col("str", ColumnType.STRING);
-            model.timestamp();
-            CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY);
+        model.col("str", ColumnType.STRING);
+        model.timestamp();
+        AbstractCairoTest.create(model);
 
-        try (TableReader reader = newTableReader(configuration, tableName)) {
-
+        try (
+                TableReader reader = newOffPoolReader(configuration, tableName);
+                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+        ) {
             Assert.assertFalse(reader.reload());
 
             final int N = 100;
             final int M = 1_000_000;
             final Rnd rnd = new Rnd();
 
-            try (TableWriter writer = newTableWriter(configuration, tableName, metrics)) {
+            try (TableWriter writer = newOffPoolWriter(configuration, tableName)) {
                 long timestamp = TimestampFormatUtils.parseUTCTimestamp("2019-01-31T10:00:00.000001Z");
                 long timestampStep = 500;
 
@@ -2610,12 +2605,11 @@ public class TableReaderTest extends AbstractCairoTest {
 
                 Assert.assertTrue(reader.reload());
 
+                cursor.toTop();
                 rnd.reset();
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
-
                 while (cursor.hasNext()) {
-                    TestUtils.assertEquals(rnd.nextChars(7), record.getStr(0));
+                    TestUtils.assertEquals(rnd.nextChars(7), record.getStrA(0));
                 }
 
                 // rnd is aligned to where we left our writer, just continue
@@ -2639,13 +2633,13 @@ public class TableReaderTest extends AbstractCairoTest {
                 Assert.assertTrue(reader.reload());
 
                 int count = 0;
-                cursor = reader.getCursor();
+                cursor.toTop();
                 rnd.reset();
                 while (cursor.hasNext()) {
                     if (count == N + M) {
-                        Assert.assertNull(record.getStr(0));
+                        Assert.assertNull(record.getStrA(0));
                     } else {
-                        TestUtils.assertEquals(rnd.nextChars(7), record.getStr(0));
+                        TestUtils.assertEquals(rnd.nextChars(7), record.getStrA(0));
                     }
                     count++;
                 }
@@ -2658,18 +2652,17 @@ public class TableReaderTest extends AbstractCairoTest {
     @Test
     public void testReloadWithoutData() throws Exception {
         TestUtils.assertMemoryLeak(() -> {
-            try (TableModel model = new TableModel(configuration, "tab", PartitionBy.DAY).col("x", ColumnType.SYMBOL).col("y", ColumnType.LONG)) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "tab", PartitionBy.DAY).col("x", ColumnType.SYMBOL).col("y", ColumnType.LONG);
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, "tab", metrics)) {
+            try (TableWriter writer = newOffPoolWriter(configuration, "tab")) {
                 TableWriter.Row r = writer.newRow();
                 r.putSym(0, "hello");
                 r.append();
 
                 writer.rollback();
 
-                try (TableReader reader = newTableReader(configuration, "tab")) {
+                try (TableReader reader = newOffPoolReader(configuration, "tab")) {
                     writer.addColumn("z", ColumnType.SYMBOL);
                     Assert.assertTrue(reader.reload());
                     writer.addColumn("w", ColumnType.INT);
@@ -2696,7 +2689,7 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testRemoveActivePartitionByYear() throws Exception {
-        testRemoveActivePartition(PartitionBy.YEAR, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 1), "2021");
+        testRemoveActivePartition(PartitionBy.YEAR, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 1), "2021");
     }
 
     @Test
@@ -2710,12 +2703,10 @@ public class TableReaderTest extends AbstractCairoTest {
             int totalCount = 0;
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", PartitionBy.NONE).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", PartitionBy.NONE).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
-
+            try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                 for (int k = 0; k < N_PARTITIONS; k++) {
                     long band = k * bandStride;
                     for (int i = 0; i < N; i++) {
@@ -2729,18 +2720,17 @@ public class TableReaderTest extends AbstractCairoTest {
                 }
 
                 Assert.assertEquals(N * N_PARTITIONS, writer.size());
-
                 Assert.assertFalse(writer.removePartition(0));
-
                 Assert.assertEquals(N * N_PARTITIONS, writer.size());
             }
 
             // now open table reader having partition gap
-            try (TableReader reader = newTableReader(configuration, "w")) {
-
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "w");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 Assert.assertEquals(N * N_PARTITIONS, reader.size());
 
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 while (cursor.hasNext()) {
                     record.getLong(0);
@@ -2814,22 +2804,22 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testRemoveFirstPartitionByYear() throws Exception {
-        testRemovePartition(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 1));
+        testRemovePartition(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 1));
     }
 
     @Test
     public void testRemoveFirstPartitionByYearReload() throws Exception {
-        testRemovePartitionReload(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 1));
+        testRemovePartitionReload(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 1));
     }
 
     @Test
     public void testRemoveFirstPartitionByYearReloadTwo() throws Exception {
-        testRemovePartitionReload(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 2));
+        testRemovePartitionReload(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 2));
     }
 
     @Test
     public void testRemoveFirstPartitionByYearTwo() throws Exception {
-        testRemovePartition(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 2));
+        testRemovePartition(PartitionBy.YEAR, "2017", 0, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 2));
     }
 
     @Test
@@ -2847,30 +2837,28 @@ public class TableReaderTest extends AbstractCairoTest {
             int bandStride = 1000;
             int totalCount = 0;
 
-            FilesFacade ff = new TestFilesFacadeImpl() {
+            final FilesFacade ff = new TestFilesFacadeImpl() {
                 @Override
-                public int rmdir(Path name) {
-                    if (Chars.endsWith(name, "2017-12-14" + Files.SEPARATOR)) {
-                        return 1;
+                public boolean rmdir(Path name, boolean lazy) {
+                    if (Utf8s.endsWithAscii(name, "2017-12-14" + Files.SEPARATOR)) {
+                        return false;
                     }
-                    return super.rmdir(name);
+                    return super.rmdir(name, lazy);
                 }
             };
 
             CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
                 @Override
-                public FilesFacade getFilesFacade() {
+                public @NotNull FilesFacade getFilesFacade() {
                     return ff;
                 }
             };
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", PartitionBy.DAY).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
-
+            try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                 for (int k = 0; k < N_PARTITIONS; k++) {
                     long band = k * bandStride;
                     for (int i = 0; i < N; i++) {
@@ -2887,7 +2875,7 @@ public class TableReaderTest extends AbstractCairoTest {
 
                 DateFormat fmt = PartitionBy.getPartitionDirFormatMethod(PartitionBy.DAY);
                 assert fmt != null;
-                final long timestamp = fmt.parse("2017-12-14", null);
+                final long timestamp = fmt.parse("2017-12-14", DateFormatUtils.EN_LOCALE);
 
                 Assert.assertTrue(writer.removePartition(timestamp));
                 Assert.assertFalse(writer.removePartition(timestamp));
@@ -2896,13 +2884,14 @@ public class TableReaderTest extends AbstractCairoTest {
             }
 
             // now open table reader having partition gap
-            try (TableReader reader = newTableReader(configuration, "w")) {
-
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "w");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 Assert.assertEquals(N * (N_PARTITIONS - 1), reader.size());
 
                 int previousBand = -1;
                 int bandCount = 0;
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 while (cursor.hasNext()) {
                     long value = record.getLong(0);
@@ -2953,12 +2942,113 @@ public class TableReaderTest extends AbstractCairoTest {
 
     @Test
     public void testRemovePartitionByYear() throws Exception {
-        testRemovePartition(PartitionBy.YEAR, "2020", 3000, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 1));
+        testRemovePartition(PartitionBy.YEAR, "2020", 3000, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 1));
     }
 
     @Test
     public void testRemovePartitionByYearReload() throws Exception {
-        testRemovePartitionReload(PartitionBy.YEAR, "2020", 3000, current -> Timestamps.addYear(Timestamps.floorYYYY(current), 1));
+        testRemovePartitionReload(PartitionBy.YEAR, "2020", 3000, current -> Timestamps.addYears(Timestamps.floorYYYY(current), 1));
+    }
+
+    @Test
+    public void testScoreBoardOverflow() throws Throwable {
+        TableModel model = new TableModel(configuration, "all", PartitionBy.DAY)
+                .col("int", ColumnType.INT)
+                .timestamp("t");
+        CreateTableTestUtils.createTableWithVersionAndId(model, engine, ColumnType.VERSION, 1);
+        assertMemoryLeak(() -> {
+            try (TableReader ignore = getReader("all")) {
+                try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
+                    for (int i = 0; i < configuration.getTxnScoreboardEntryCount() + 1; i++) {
+                        TableWriter.Row r = writer.newRow(1000);
+                        r.putInt(0, 100);
+                        r.append();
+                        writer.commit();
+                    }
+                }
+
+                try (TableReader ignore2 = getReader("all")) {
+                    Assert.fail();
+                } catch (CairoException ex) {
+                    TestUtils.assertContains(ex.getFlyweightMessage(), "max txn-inflight limit reached");
+                }
+
+                try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
+                    TableWriter.Row r = writer.newRow(0);
+                    r.putInt(0, 100);
+                    r.append();
+                    writer.commit();
+                }
+            }
+        });
+    }
+
+    @Test
+    public void testStringColumnRemove() throws Exception {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
+
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.STRING).col("b", ColumnType.STRING);
+                    AbstractCairoTest.create(model);
+
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
+                    // make sure we forbid deleting column "b" files
+
+                    try (TableWriter writer = getWriter("x")) {
+                        for (int i = 0; i < N; i++) {
+                            TableWriter.Row row = writer.newRow();
+                            row.putStr(0, rnd.nextChars(10));
+                            row.putStr(1, rnd.nextChars(15));
+                            row.append();
+                        }
+                        writer.commit();
+
+                        try (
+                                TableReader reader = getReader("x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
+
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getStrA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getStrA(1));
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
+
+                            // It used to be: this must fail because we cannot delete foreign files
+                            // but with column version file we can handle it.
+                            writer.addColumn("b", ColumnType.STRING);
+
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N, reader.size());
+
+                            rnd.reset();
+                            cursor.toTop();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getStrA(0));
+                                // roll random generator to make sure it returns same values
+                                rnd.nextChars(15);
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N * 2, counter);
+                        }
+                    }
+                }
+        );
     }
 
     @Test
@@ -2966,17 +3056,16 @@ public class TableReaderTest extends AbstractCairoTest {
         String expected = "{\"columnCount\":3,\"columns\":[{\"index\":0,\"name\":\"a\",\"type\":\"SYMBOL\",\"indexed\":true,\"indexValueBlockCapacity\":2},{\"index\":1,\"name\":\"b\",\"type\":\"INT\"},{\"index\":2,\"name\":\"timestamp\",\"type\":\"TIMESTAMP\"}],\"timestampIndex\":2}";
 
         TestUtils.assertMemoryLeak(() -> {
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.DAY)
+            TableModel model = new TableModel(configuration, "x", PartitionBy.DAY)
                     .col("a", ColumnType.SYMBOL).indexed(true, 2)
                     .col("b", ColumnType.INT)
-                    .timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+                    .timestamp();
+            AbstractCairoTest.create(model);
 
             int N = 1000;
             long ts = TimestampFormatUtils.parseTimestamp("2018-01-06T10:00:00.000Z");
             final Rnd rnd = new Rnd();
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
+            try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
                 sink.clear();
                 writer.getMetadata().toJson(sink);
                 TestUtils.assertEquals(expected, sink);
@@ -2990,7 +3079,7 @@ public class TableReaderTest extends AbstractCairoTest {
                 }
             }
 
-            try (TableReader reader = newTableReader(configuration, "x")) {
+            try (TableReader reader = newOffPoolReader(configuration, "x")) {
                 sink.clear();
                 reader.getMetadata().toJson(sink);
                 TestUtils.assertEquals(expected, sink);
@@ -2999,721 +3088,385 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     @Test
-    public void testUnsuccessfulFileRemove() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
-
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.STRING).col("b", ColumnType.STRING)) {
-                CreateTableTestUtils.create(model);
-            }
-
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 0;
-
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (Chars.endsWith(name, "b.i") || Chars.endsWith(name, "b.d")) {
-                        counter++;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
-
-                @Override
-                public boolean wasCalled() {
-                    return counter > 0;
-                }
-            };
-
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
-
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                for (int i = 0; i < N; i++) {
-                    TableWriter.Row row = writer.newRow();
-                    row.putStr(0, rnd.nextChars(10));
-                    row.putStr(1, rnd.nextChars(15));
-                    row.append();
-                }
-                writer.commit();
-
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
-
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getStr(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getStr(1));
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N, counter);
-
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
-
-                    // It used to be: this must fail because we cannot delete foreign files
-                    // but with column version file we can handle it.
-                    writer.addColumn("b", ColumnType.STRING);
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload());
-                    Assert.assertEquals(N, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getStr(0));
-                        // roll random generator to make sure it returns same values
-                        rnd.nextChars(15);
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N * 2, counter);
-                }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
-    }
-
-    @Test
     public void testUnsuccessfulFileRemoveAndReloadStr() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.STRING);
+                    AbstractCairoTest.create(model);
 
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.STRING)) {
-                CreateTableTestUtils.create(model);
-            }
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
+                    // make sure we forbid deleting column "b" files
 
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 2;
-
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (counter > 0 && (
-                            (
-                                    Chars.endsWith(name, "b.i") ||
-                                            Chars.endsWith(name, "b.d") ||
-                                            Chars.endsWith(name, "b.o") ||
-                                            Chars.endsWith(name, "b.k") ||
-                                            Chars.endsWith(name, "b.c") ||
-                                            Chars.endsWith(name, "b.v")
-                            )
-                    )) {
-                        counter--;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
-
-                @Override
-                public boolean wasCalled() {
-                    return counter < 1;
-                }
-            };
-
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
-
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                for (int i = 0; i < N; i++) {
-                    TableWriter.Row row = writer.newRow();
-                    row.putSym(0, rnd.nextChars(10));
-                    row.putStr(1, rnd.nextChars(15));
-                    row.append();
-                }
-                writer.commit();
-
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
-
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getStr(1));
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N, counter);
-
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
-
-                    if (configuration.getFilesFacade().isRestrictedFileSystem()) {
-                        reader.closeColumnForRemove("b");
-                    }
-
-                    // now when we add new column by same name it must not pick up files we failed to delete previously
-                    writer.addColumn("b", ColumnType.STRING);
-
-                    for (int i = 0; i < N; i++) {
-                        TableWriter.Row row = writer.newRow();
-                        row.putSym(0, rnd.nextChars(10));
-                        row.putStr(2, rnd.nextChars(15));
-                        row.append();
-                    }
-                    writer.commit();
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload());
-                    Assert.assertEquals(N * 2, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    counter = 0;
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        if (counter < N) {
-                            // roll random generator to make sure it returns same values
-                            rnd.nextChars(15);
-                            Assert.assertNull(record.getStr(1));
-                        } else {
-                            Assert.assertEquals(rnd.nextChars(15), record.getStr(1));
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        for (int i = 0; i < N; i++) {
+                            TableWriter.Row row = writer.newRow();
+                            row.putSym(0, rnd.nextChars(10));
+                            row.putStr(1, rnd.nextChars(15));
+                            row.append();
                         }
-                        counter++;
+                        writer.commit();
+
+                        try (
+                                TableReader reader = getReader("x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
+
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getStrA(1));
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
+
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn("b", ColumnType.STRING);
+
+                            for (int i = 0; i < N; i++) {
+                                TableWriter.Row row = writer.newRow();
+                                row.putSym(0, rnd.nextChars(10));
+                                row.putStr(2, rnd.nextChars(15));
+                                row.append();
+                            }
+                            writer.commit();
+
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
+
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getStrA(1));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getStrA(1));
+                                }
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N * 2, counter);
+                        }
                     }
 
-                    Assert.assertEquals(N * 2, counter);
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 2);
                 }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
+        );
     }
 
-    // TODO: rename column is non transactional on File System. When file rename fails, metadata does not match files on the disk
-    // To fix it we have to copy files and then delete. We can use hard links to copy on the file systems where it's supported
     @Test
-    @Ignore
     public void testUnsuccessfulFileRename() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
 
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.STRING).col("b", ColumnType.STRING)) {
-                CreateTableTestUtils.create(model);
-            }
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.STRING).col("b", ColumnType.STRING);
+                    AbstractCairoTest.create(model);
 
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 0;
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
 
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (Chars.endsWith(name, "b.i") || Chars.endsWith(name, "b.d")) {
-                        counter++;
-                        return false;
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        for (int i = 0; i < N; i++) {
+                            TableWriter.Row row = writer.newRow();
+                            row.putStr(0, rnd.nextChars(10));
+                            row.putStr(1, rnd.nextChars(15));
+                            row.append();
+                        }
+                        writer.commit();
+
+                        try (
+                                TableReader reader = getReader("x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
+
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getStrA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getStrA(1));
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+
+                            // this should write metadata without column "b" but will ignore
+                            // file rename failures
+                            writer.renameColumn("b", "bb");
+
+                            // It used to be: this must fail because we cannot delete foreign files
+                            // but with column version file we can handle it.
+                            writer.addColumn("b", ColumnType.STRING);
+
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload()); // This fails with could not open read-only .. /bb.i.
+                            Assert.assertEquals(N, reader.size());
+
+                            rnd.reset();
+                            cursor.toTop();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getStrA(0));
+                                // roll random generator to make sure it returns same values
+                                rnd.nextChars(15);
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N * 2, counter);
+                        }
                     }
-                    return super.remove(name);
+                    engine.releaseInactive();
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 2);
                 }
-
-                @Override
-                public int rename(LPSZ name, LPSZ to) {
-                    if (Chars.endsWith(name, "b.i") || Chars.endsWith(name, "b.d")) {
-                        counter++;
-                        return Files.FILES_RENAME_ERR_OTHER;
-                    }
-                    return super.rename(name, to);
-                }
-
-                @Override
-                public boolean wasCalled() {
-                    return counter > 0;
-                }
-            };
-
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
-
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                for (int i = 0; i < N; i++) {
-                    TableWriter.Row row = writer.newRow();
-                    row.putStr(0, rnd.nextChars(10));
-                    row.putStr(1, rnd.nextChars(15));
-                    row.append();
-                }
-                writer.commit();
-
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
-
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getStr(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getStr(1));
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N, counter);
-
-                    // this should write metadata without column "b" but will ignore
-                    // file rename failures
-                    writer.renameColumn("b", "bb");
-
-                    // It used to be: this must fail because we cannot delete foreign files
-                    // but with column version file we can handle it.
-                    writer.addColumn("b", ColumnType.STRING);
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload()); // This fails with could not open read-only .. /bb.i.
-                    Assert.assertEquals(N, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getStr(0));
-                        // roll random generator to make sure it returns same values
-                        rnd.nextChars(15);
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N * 2, counter);
-                }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
+        );
     }
 
     @Test
     public void testUnsuccessfulRemoveAndReloadSym() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
 
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.SYMBOL)) {
-                CreateTableTestUtils.create(model);
-            }
+        assertMemoryLeak(
+                ff, () -> {
 
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 5;
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                            .col("a", ColumnType.SYMBOL)
+                            .col("b", ColumnType.SYMBOL);
+                    AbstractCairoTest.create(model);
 
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (counter > 0 && (
-                            (
-                                    Chars.endsWith(name, "b.i") ||
-                                            Chars.endsWith(name, "b.d") ||
-                                            Chars.endsWith(name, "b.o") ||
-                                            Chars.endsWith(name, "b.k") ||
-                                            Chars.endsWith(name, "b.c") ||
-                                            Chars.endsWith(name, "b.v")
-                            )
-                    )) {
-                        counter--;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
 
-                @Override
-                public boolean wasCalled() {
-                    return counter < 1;
-                }
-            };
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
 
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
+                        try (
+                                TableReader reader = newOffPoolReader(configuration, "x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
 
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                appendTwoSymbols(writer, rnd, 1);
-                writer.commit();
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
 
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
+                            Assert.assertEquals(N, counter);
 
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
-                        counter++;
-                    }
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
 
-                    Assert.assertEquals(N, counter);
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn("b", ColumnType.SYMBOL);
 
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
+                            // SymbolMap must be cleared when we try to do add values to new column
+                            appendTwoSymbols(writer, rnd, 2);
+                            writer.commit();
 
-                    if (configuration.getFilesFacade().isRestrictedFileSystem()) {
-                        reader.closeColumnForRemove("b");
-                    }
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
 
-//                    reader.reload();
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getSymA(1));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                }
+                                counter++;
+                            }
 
-                    // now when we add new column by same name it must not pick up files we failed to delete previously
-                    writer.addColumn("b", ColumnType.SYMBOL);
-
-                    // SymbolMap must be cleared when we try to do add values to new column
-                    appendTwoSymbols(writer, rnd, 2);
-                    writer.commit();
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload());
-                    Assert.assertEquals(N * 2, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    counter = 0;
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        if (counter < N) {
-                            // roll random generator to make sure it returns same values
-                            rnd.nextChars(15);
-                            Assert.assertNull(record.getSym(1));
-                        } else {
-                            Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
+                            Assert.assertEquals(N * 2, counter);
                         }
-                        counter++;
                     }
-
-                    Assert.assertEquals(N * 2, counter);
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 4);
                 }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
+        );
     }
 
     @Test
     public void testUnsuccessfulRemoveAndReloadSymTwice() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
 
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.SYMBOL)) {
-                CreateTableTestUtils.create(model);
-            }
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)
+                            .col("a", ColumnType.SYMBOL)
+                            .col("b", ColumnType.SYMBOL).indexed(true, 256);
+                    AbstractCairoTest.create(model);
 
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 5;
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
+                    // make sure we forbid deleting column "b" files
 
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (counter > 0 && (
-                            (
-                                    Chars.endsWith(name, "b.i") ||
-                                            Chars.endsWith(name, "b.d") ||
-                                            Chars.endsWith(name, "b.o") ||
-                                            Chars.endsWith(name, "b.k") ||
-                                            Chars.endsWith(name, "b.c") ||
-                                            Chars.endsWith(name, "b.v")
-                            )
-                    )) {
-                        counter--;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
 
-                @Override
-                public boolean wasCalled() {
-                    return counter < 1;
-                }
-            };
+                        try (
+                                TableReader reader = newOffPoolReader(configuration, "x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
 
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
+                            rnd.reset();
+                            Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
 
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                appendTwoSymbols(writer, rnd, 1);
-                writer.commit();
+                            Assert.assertEquals(N, counter);
 
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
+                            reader.reload();
 
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
-                        counter++;
-                    }
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn("b", ColumnType.SYMBOL);
 
-                    Assert.assertEquals(N, counter);
+                            // SymbolMap must be cleared when we try to do add values to new column
+                            appendTwoSymbols(writer, rnd, 2);
+                            writer.commit();
 
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
 
-                    reader.reload();
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getSymA(1));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                }
+                                counter++;
+                            }
 
-                    // now when we add new column by same name it must not pick up files we failed to delete previously
-                    writer.addColumn("b", ColumnType.SYMBOL);
-
-                    // SymbolMap must be cleared when we try to do add values to new column
-                    appendTwoSymbols(writer, rnd, 2);
-                    writer.commit();
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload());
-                    Assert.assertEquals(N * 2, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    counter = 0;
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        if (counter < N) {
-                            // roll random generator to make sure it returns same values
-                            rnd.nextChars(15);
-                            Assert.assertNull(record.getSym(1));
-                        } else {
-                            Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
+                            Assert.assertEquals(N * 2, counter);
                         }
-                        counter++;
+
+                        checkColumnPurgeRemovesFiles(counterRef, ff, 5);
                     }
-
-                    Assert.assertEquals(N * 2, counter);
                 }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
+        );
     }
 
     @Test
     public void testUnsuccessfulRemoveExplicitColCloseAndReloadSym() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
+        AtomicInteger counterRef = new AtomicInteger(CANNOT_DELETE);
+        TestFilesFacade ff = createColumnDeleteCounterFileFacade(counterRef, "b", "");
 
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.SYMBOL)) {
-                CreateTableTestUtils.create(model);
-            }
+        assertMemoryLeak(
+                ff, () -> {
+                    // create table with two string columns
+                    TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.SYMBOL).indexed(true, 256);
+                    AbstractCairoTest.create(model);
 
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 5;
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
+                    // make sure we forbid deleting column "b" files
 
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (counter > 0 && (
-                            (
-                                    Chars.endsWith(name, "b.i") ||
-                                            Chars.endsWith(name, "b.d") ||
-                                            Chars.endsWith(name, "b.o") ||
-                                            Chars.endsWith(name, "b.k") ||
-                                            Chars.endsWith(name, "b.c") ||
-                                            Chars.endsWith(name, "b.v")
-                            )
-                    )) {
-                        counter--;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
 
-                @Override
-                public boolean wasCalled() {
-                    return counter < 1;
-                }
-            };
+                        try (
+                                TableReader reader = newOffPoolReader(configuration, "x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
 
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
 
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                appendTwoSymbols(writer, rnd, 1);
-                writer.commit();
+                            Assert.assertEquals(N, counter);
 
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn("b");
 
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
-                        counter++;
-                    }
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn("b", ColumnType.SYMBOL);
 
-                    Assert.assertEquals(N, counter);
+                            // SymbolMap must be cleared when we try to do add values to new column
+                            appendTwoSymbols(writer, rnd, 2);
+                            writer.commit();
 
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
 
-                    reader.closeColumnForRemove("b");
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getSymA(1));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                }
+                                counter++;
+                            }
 
-                    // now when we add new column by same name it must not pick up files we failed to delete previously
-                    writer.addColumn("b", ColumnType.SYMBOL);
-
-                    // SymbolMap must be cleared when we try to do add values to new column
-                    appendTwoSymbols(writer, rnd, 2);
-                    writer.commit();
-
-                    // now assert what reader sees
-                    Assert.assertTrue(reader.reload());
-                    Assert.assertEquals(N * 2, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    counter = 0;
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        if (counter < N) {
-                            // roll random generator to make sure it returns same values
-                            rnd.nextChars(15);
-                            Assert.assertNull(record.getSym(1));
-                        } else {
-                            Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
+                            Assert.assertEquals(N * 2, counter);
                         }
-                        counter++;
                     }
 
-                    Assert.assertEquals(N * 2, counter);
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 5);
                 }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
-    }
-
-    @Test
-    public void testUnsuccessfulRemoveLastSym() throws Exception {
-        TestUtils.assertMemoryLeak(() -> {
-
-            // create table with two string columns
-            try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE).col("a", ColumnType.SYMBOL).col("b", ColumnType.SYMBOL)) {
-                CreateTableTestUtils.create(model);
-            }
-
-            Rnd rnd = new Rnd();
-            final int N = 1000;
-            // make sure we forbid deleting column "b" files
-            TestFilesFacade ff = new TestFilesFacade() {
-                int counter = 5;
-
-                @Override
-                public boolean remove(LPSZ name) {
-                    if (counter > 0 && (
-                            (
-                                    Chars.endsWith(name, "b.i") ||
-                                            Chars.endsWith(name, "b.d") ||
-                                            Chars.endsWith(name, "b.o") ||
-                                            Chars.endsWith(name, "b.k") ||
-                                            Chars.endsWith(name, "b.c") ||
-                                            Chars.endsWith(name, "b.v")
-                            )
-                    )) {
-                        counter--;
-                        return false;
-                    }
-                    return super.remove(name);
-                }
-
-                @Override
-                public boolean wasCalled() {
-                    return counter < 1;
-                }
-            };
-
-            CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                @Override
-                public FilesFacade getFilesFacade() {
-                    return ff;
-                }
-            };
-
-            // populate table and delete column
-            try (TableWriter writer = newTableWriter(configuration, "x", metrics)) {
-                appendTwoSymbols(writer, rnd, 1);
-                writer.commit();
-
-                try (TableReader reader = newTableReader(configuration, "x")) {
-                    long counter = 0;
-
-                    rnd.reset();
-                    RecordCursor cursor = reader.getCursor();
-                    final Record record = cursor.getRecord();
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        Assert.assertEquals(rnd.nextChars(15), record.getSym(1));
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N, counter);
-
-                    // this should write metadata without column "b" but will ignore
-                    // file delete failures
-                    writer.removeColumn("b");
-
-                    Assert.assertTrue(reader.reload());
-
-                    Assert.assertEquals(N, reader.size());
-
-                    rnd.reset();
-                    cursor.toTop();
-                    counter = 0;
-                    while (cursor.hasNext()) {
-                        Assert.assertEquals(rnd.nextChars(10), record.getSym(0));
-                        // roll random generator to make sure it returns same values
-                        rnd.nextChars(15);
-                        counter++;
-                    }
-
-                    Assert.assertEquals(N, counter);
-                }
-            }
-
-            Assert.assertTrue(ff.wasCalled());
-        });
+        );
     }
 
     private static long allocBlob() {
@@ -3738,16 +3491,58 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     private static void assertNullStr(Record r, int index) {
-        Assert.assertNull(r.getStr(index));
+        Assert.assertNull(r.getStrA(index));
         Assert.assertNull(r.getStrB(index));
         Assert.assertEquals(TableUtils.NULL_LEN, r.getStrLen(index));
     }
 
     private static void assertStrColumn(CharSequence expected, Record r, int index) {
-        TestUtils.assertEquals(expected, r.getStr(index));
+        TestUtils.assertEquals(expected, r.getStrA(index));
         TestUtils.assertEquals(expected, r.getStrB(index));
-        Assert.assertNotSame(r.getStr(index), r.getStrB(index));
+        Assert.assertNotSame(r.getStrA(index), r.getStrB(index));
         Assert.assertEquals(expected.length(), r.getStrLen(index));
+    }
+
+    private static void checkColumnPurgeRemovesFiles(AtomicInteger counterRef, TestFilesFacade ff, int removeCallsExpected) throws SqlException {
+        Assert.assertFalse(ff.wasCalled());
+        counterRef.set(0);
+        try (ColumnPurgeJob job = new ColumnPurgeJob(engine)) {
+            job.run(0);
+        }
+        Assert.assertTrue(ff.called() >= removeCallsExpected);
+    }
+
+    @NotNull
+    private static TestFilesFacade createColumnDeleteCounterFileFacade(AtomicInteger counterRef, String columnName, final String suffix) {
+        return new TestFilesFacade() {
+            @Override
+            public int called() {
+                return counterRef.get();
+            }
+
+            @Override
+            public boolean removeQuiet(LPSZ name) {
+                if (
+                        Utf8s.endsWithAscii(name, columnName + ".i")
+                                || Utf8s.endsWithAscii(name, columnName + ".d" + suffix)
+                                || Utf8s.endsWithAscii(name, columnName + ".o" + suffix)
+                                || Utf8s.endsWithAscii(name, columnName + ".k" + suffix)
+                                || Utf8s.endsWithAscii(name, columnName + ".c" + suffix)
+                                || Utf8s.endsWithAscii(name, columnName + ".v" + suffix)
+                ) {
+                    if (counterRef.get() == CANNOT_DELETE) {
+                        return false;
+                    }
+                    counterRef.incrementAndGet();
+                }
+                return super.removeQuiet(name);
+            }
+
+            @Override
+            public boolean wasCalled() {
+                return counterRef.get() > 0;
+            }
+        };
     }
 
     private static void freeBlob(long blob) {
@@ -3755,8 +3550,8 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     private static Path getPath(String tableName) {
-        TableToken tableToken = engine.getTableToken(tableName);
-        return new Path().of(engine.getConfiguration().getRoot()).concat(tableToken).concat(TableUtils.META_FILE_NAME).$();
+        TableToken tableToken = engine.verifyTableName(tableName);
+        return new Path().of(engine.getConfiguration().getDbRoot()).concat(tableToken).concat(TableUtils.META_FILE_NAME);
     }
 
     private static String padHexLong(long value) {
@@ -3777,80 +3572,101 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     private void assertBatch2(int count, long increment, long ts, long blob, TableReader reader) {
-        RecordCursor cursor = reader.getCursor();
-        Rnd exp = new Rnd();
-        long ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd13, ts13, blob13) -> {
-            BATCH1_ASSERTER.assertRecord(r, rnd13, ts13, blob13);
-            BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd13, ts13, blob13);
-        });
-        assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH2_ASSERTER);
+        try (TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)) {
+            Rnd exp = new Rnd();
+            long ts2 = assertPartialCursor(
+                    cursor, exp, ts, increment, blob, 3L * count, (r, rnd13, ts13, blob13) -> {
+                        BATCH1_ASSERTER.assertRecord(r, rnd13, ts13, blob13);
+                        BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd13, ts13, blob13);
+                    }
+            );
+            assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH2_ASSERTER);
+        }
     }
 
     private void assertBatch3(int count, long increment, long ts, long blob, TableReader reader) {
         Rnd exp = new Rnd();
         long ts2;
-        RecordCursor cursor = reader.getCursor();
-        ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        try (TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)) {
+            ts2 = assertPartialCursor(
+                    cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                        BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                        BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                        BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    }
+            );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd12, ts12, blob12) -> {
-            BATCH2_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
-        });
+            ts2 = assertPartialCursor(
+                    cursor, exp, ts2, increment, blob, count, (r, rnd12, ts12, blob12) -> {
+                        BATCH2_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
+                        BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
+                    }
+            );
 
-        assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH3_ASSERTER);
+            assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH3_ASSERTER);
+        }
     }
 
     private void assertBatch4(int count, long increment, long ts, long blob, TableReader reader) {
         Rnd exp;
         long ts2;
         exp = new Rnd();
-        RecordCursor cursor = reader.getCursor();
-        ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        try (TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)) {
+            ts2 = assertPartialCursor(
+                    cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                        BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                        BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                        BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                        BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    }
+            );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd12, ts12, blob12) -> {
-            BATCH2_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
-            BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
-        });
+            ts2 = assertPartialCursor(
+                    cursor, exp, ts2, increment, blob, count, (r, rnd12, ts12, blob12) -> {
+                        BATCH2_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
+                        BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
+                        BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd12, ts12, blob12);
+                    }
+            );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd14, ts14, blob14) -> {
-            BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd14, ts14, blob14);
-            BATCH3_ASSERTER.assertRecord(r, rnd14, ts14, blob14);
-        });
+            ts2 = assertPartialCursor(
+                    cursor, exp, ts2, increment, blob, count, (r, rnd14, ts14, blob14) -> {
+                        BATCH4_BEFORE_ASSERTER.assertRecord(r, rnd14, ts14, blob14);
+                        BATCH3_ASSERTER.assertRecord(r, rnd14, ts14, blob14);
+                    }
+            );
 
-        assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH4_ASSERTER);
+            assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH4_ASSERTER);
+        }
     }
 
     private long assertBatch5(int count, long increment, long ts, long blob, RecordCursor cursor, Rnd exp) {
         long ts2;
 
         cursor.toTop();
-        ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                    BATCH1_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH2_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH2_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH2_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH3_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH3_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH5_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH3_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
         return assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH5_ASSERTER);
     }
@@ -3867,23 +3683,29 @@ public class TableReaderTest extends AbstractCairoTest {
     private void assertBatch7(int count, long increment, long ts, long blob, RecordCursor cursor) {
         cursor.toTop();
         Rnd exp = new Rnd();
-        long ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_2_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        long ts2 = assertPartialCursor(
+                cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                    BATCH1_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_2_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH2_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH2_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH3_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH3_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
         ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH5_7_ASSERTER);
         assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH6_7_ASSERTER);
@@ -3892,23 +3714,29 @@ public class TableReaderTest extends AbstractCairoTest {
     private void assertBatch8(int count, long increment, long ts, long blob, RecordCursor cursor) {
         cursor.toTop();
         Rnd exp = new Rnd();
-        long ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_2_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        long ts2 = assertPartialCursor(
+                cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                    BATCH1_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_2_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH2_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH2_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH3_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH3_7_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_7_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
         ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH5_7_ASSERTER);
         ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH6_7_ASSERTER);
@@ -3918,23 +3746,29 @@ public class TableReaderTest extends AbstractCairoTest {
     private void assertBatch9(int count, long increment, long ts, long blob, RecordCursor cursor) {
         cursor.toTop();
         Rnd exp = new Rnd();
-        long ts2 = assertPartialCursor(cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
-            BATCH1_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_2_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        long ts2 = assertPartialCursor(
+                cursor, exp, ts, increment, blob, 3L * count, (r, rnd1, ts1, blob1) -> {
+                    BATCH1_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_2_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH2_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_3_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH2_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_3_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
-        ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
-            BATCH3_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-            BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
-        });
+        ts2 = assertPartialCursor(
+                cursor, exp, ts2, increment, blob, count, (r, rnd1, ts1, blob1) -> {
+                    BATCH3_9_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                    BATCH_4_9_BEFORE_ASSERTER.assertRecord(r, rnd1, ts1, blob1);
+                }
+        );
 
         ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH5_9_ASSERTER);
         ts2 = assertPartialCursor(cursor, exp, ts2, increment, blob, count, BATCH6_9_ASSERTER);
@@ -3981,10 +3815,9 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     private TableToken createTable(String tableName, int partitionBy) {
-        try (TableModel model = new TableModel(configuration, tableName, partitionBy)) {
-            model.timestamp();
-            return CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, tableName, partitionBy);
+        model.timestamp();
+        return AbstractCairoTest.create(model);
     }
 
     private long testAppend(TableWriter writer, Rnd rnd, long ts, int count, long inc, long blob, int testPartitionSwitch, FieldGenerator generator) {
@@ -4010,72 +3843,75 @@ public class TableReaderTest extends AbstractCairoTest {
     }
 
     private long testAppend(Rnd rnd, CairoConfiguration configuration, long ts, int count, long inc, long blob, int testPartitionSwitch) {
-        try (TableWriter writer = newTableWriter(configuration, "all", metrics)) {
+        try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
             return testAppend(writer, rnd, ts, count, inc, blob, testPartitionSwitch, TableReaderTest.BATCH1_GENERATOR);
         }
     }
 
-    private void testCloseColumn(int partitionBy, int count, long increment, String column, RecordAssert assertAfter) throws Exception {
-        final Rnd rnd = new Rnd();
-        final LongList fds = new LongList();
-        String dcol = column + ".d";
-        String icol = column + ".i";
+    private void testAsyncColumnRename(AtomicInteger counterRef, TestFilesFacade ff, String columnName) throws Exception {
+        assertMemoryLeak(
+                ff, () -> {
+                    Rnd rnd = new Rnd();
+                    final int N = 1000;
 
-        TestFilesFacade ff = new TestFilesFacade() {
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
 
-            boolean called = false;
+                        try (
+                                TableReader reader = newOffPoolReader(configuration, "x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
 
-            @Override
-            public boolean close(int fd) {
-                fds.remove(fd);
-                return super.close(fd);
-            }
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
 
-            @Override
-            public int openRO(LPSZ name) {
-                int fd = super.openRO(name);
-                if (Chars.endsWith(name, dcol) || Chars.endsWith(name, icol)) {
-                    fds.add(fd);
-                    called = true;
-                }
-                return fd;
-            }
+                            Assert.assertEquals(N, counter);
 
-            @Override
-            public boolean wasCalled() {
-                return called;
-            }
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.renameColumn(columnName, "d");
 
+                            // now when we add new column by same name it must not pick up files we failed to delete previously
+                            writer.addColumn(columnName, ColumnType.SYMBOL);
 
-        };
+                            // SymbolMap must be cleared when we try to do add values to new column
+                            appendTwoSymbols(writer, rnd, 2);
+                            writer.commit();
 
-        long blob = allocBlob();
-        try {
-            TestUtils.assertMemoryLeak(() -> {
-                CreateTableTestUtils.createAllTable(engine, partitionBy);
-                long ts = TimestampFormatUtils.parseTimestamp("2013-03-04T00:00:00.000Z");
+                            // now assert what reader sees
+                            Assert.assertTrue(reader.reload());
+                            Assert.assertEquals(N * 2, reader.size());
 
-                CairoConfiguration configuration = new DefaultTestCairoConfiguration(root) {
-                    @Override
-                    public FilesFacade getFilesFacade() {
-                        return ff;
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                if (counter < N) {
+                                    // roll random generator to make sure it returns same values
+                                    rnd.nextChars(15);
+                                    Assert.assertNull(record.getSymA(2));
+                                } else {
+                                    Assert.assertEquals(rnd.nextChars(15), record.getSymA(2));
+                                }
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N * 2, counter);
+                        }
                     }
-                };
-                testAppend(rnd, configuration, ts, count, increment, blob, 0);
-
-                try (TableReader reader = newTableReader(configuration, "all")) {
-                    RecordCursor cursor = reader.getCursor();
-                    assertCursor(cursor, ts, increment, blob, count, BATCH1_ASSERTER);
-                    reader.closeColumnForRemove(column);
-                    assertCursor(cursor, ts, increment, blob, count, assertAfter);
+                    engine.releaseInactive();
+                    checkColumnPurgeRemovesFiles(counterRef, ff, 6);
                 }
-
-                Assert.assertTrue(ff.wasCalled());
-                Assert.assertEquals(0, fds.size());
-            });
-        } finally {
-            freeBlob(blob);
-        }
+        );
     }
 
     private void testConcurrentReloadMultiplePartitions(int partitionBy, long stride) throws Exception {
@@ -4083,13 +3919,12 @@ public class TableReaderTest extends AbstractCairoTest {
             final int N = 1024_0000;
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
             final int threads = 2;
             final CyclicBarrier startBarrier = new CyclicBarrier(threads);
-            final CountDownLatch stopLatch = new CountDownLatch(threads);
+            final SOCountDownLatch stopLatch = new SOCountDownLatch(threads);
             final AtomicInteger errors = new AtomicInteger(0);
 
             // start writer
@@ -4097,7 +3932,7 @@ public class TableReaderTest extends AbstractCairoTest {
                 try {
                     startBarrier.await();
                     long timestampUs = TimestampFormatUtils.parseTimestamp("2017-12-11T00:00:00.000Z");
-                    try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
+                    try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                         for (int i = 0; i < N; i++) {
                             TableWriter.Row row = writer.newRow(timestampUs);
                             row.putLong(0, i);
@@ -4118,8 +3953,10 @@ public class TableReaderTest extends AbstractCairoTest {
             new Thread(() -> {
                 try {
                     startBarrier.await();
-                    try (TableReader reader = newTableReader(configuration, "w")) {
-                        RecordCursor cursor = reader.getCursor();
+                    try (
+                            TableReader reader = newOffPoolReader(configuration, "w");
+                            TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                    ) {
                         final Record record = cursor.getRecord();
                         sink.clear();
                         ((Sinkable) record).toSink(sink);
@@ -4152,23 +3989,18 @@ public class TableReaderTest extends AbstractCairoTest {
                 }
             }).start();
 
-            long start = System.currentTimeMillis();
-            boolean result = stopLatch.await(5, TimeUnit.MINUTES);
-            System.out.printf("took: %d%n", System.currentTimeMillis() - start);
-            if (!result) {
-                Assert.fail("too long, threading issue");
-            }
+            stopLatch.await();
             Assert.assertEquals(0, errors.get());
 
             // check that we had multiple partitions created during the test
-            try (TableReader reader = newTableReader(configuration, "w")) {
+            try (TableReader reader = newOffPoolReader(configuration, "w")) {
                 Assert.assertTrue(reader.getPartitionCount() > 10);
             }
         });
     }
 
-    private void testReload(int partitionBy, int count, long inct, final int testPartitionSwitch) throws Exception {
-        final long increment = inct * 1000;
+    private void testReload(int partitionBy, int count, long inc, final int testPartitionSwitch) throws Exception {
+        final long increment = inc * 1000;
 
         CreateTableTestUtils.createAllTable(engine, partitionBy);
 
@@ -4181,15 +4013,20 @@ public class TableReaderTest extends AbstractCairoTest {
             try {
                 // test if reader behaves correctly when table is empty
 
-                try (TableReader reader = newTableReader(configuration, "all")) {
+                try (
+                        TableReader reader = newOffPoolReader(configuration, "all");
+                        TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                ) {
                     // can we reload empty table?
                     Assert.assertFalse(reader.reload());
                     // reader can see all the rows ? Meaning none?
-                    assertCursor(reader.getCursor(), ts, increment, blob, 0, null);
+                    assertCursor(cursor, ts, increment, blob, 0, null);
                 }
 
-                try (TableReader reader = newTableReader(configuration, "all")) {
-                    RecordCursor cursor = reader.getCursor();
+                try (
+                        TableReader reader = newOffPoolReader(configuration, "all");
+                        TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                ) {
                     // this combination of reload/iterate/reload is deliberate
                     // we make sure that reload() behavior is not affected by
                     // iterating empty result set
@@ -4209,9 +4046,12 @@ public class TableReaderTest extends AbstractCairoTest {
                     assertCursor(cursor, ts, increment, blob, count, BATCH1_ASSERTER);
 
                     // create another reader to make sure it can load data from constructor
-                    try (TableReader reader2 = newTableReader(configuration, "all")) {
+                    try (
+                            TableReader reader2 = newOffPoolReader(configuration, "all");
+                            TestTableReaderRecordCursor cursor2 = new TestTableReaderRecordCursor().of(reader2)
+                    ) {
                         // make sure we can see first batch right after table is open
-                        assertCursor(reader2.getCursor(), ts, increment, blob, count, BATCH1_ASSERTER);
+                        assertCursor(cursor2, ts, increment, blob, count, BATCH1_ASSERTER);
                     }
 
                     // try to reload when table hasn't changed
@@ -4235,8 +4075,7 @@ public class TableReaderTest extends AbstractCairoTest {
 
                     // writer will inflate last partition in order to optimise appends
                     // reader must be able to cope with that
-                    try (TableWriter writer = newTableWriter(configuration, "all", metrics)) {
-
+                    try (TableWriter writer = newOffPoolWriter(configuration, "all")) {
                         // this is a bit of paranoid check, but make sure our reader doesn't flinch when new writer is open
                         assertCursor(cursor, ts, increment, blob, 2L * count, BATCH1_ASSERTER);
 
@@ -4311,11 +4150,6 @@ public class TableReaderTest extends AbstractCairoTest {
                         assertBatch4(count, increment, ts, blob, reader);
 
                         // now delete last column
-
-                        if (configuration.getFilesFacade().isRestrictedFileSystem()) {
-                            reader.closeColumnForRemove("bin2");
-                        }
-
                         writer.removeColumn("bin2");
 
                         Assert.assertTrue(reader.reload());
@@ -4334,10 +4168,6 @@ public class TableReaderTest extends AbstractCairoTest {
                         // and assert that all columns that have not been deleted contain correct values
                         assertBatch6(count, increment, ts, blob, cursor);
 
-                        if (configuration.getFilesFacade().isRestrictedFileSystem()) {
-                            reader.closeColumnForRemove("int");
-                        }
-
                         // remove first column and add new column by same name
                         writer.removeColumn("int");
                         writer.addColumn("int", ColumnType.INT);
@@ -4355,10 +4185,6 @@ public class TableReaderTest extends AbstractCairoTest {
                         assertOpenPartitionCount(reader);
 
                         assertBatch8(count, increment, ts, blob, cursor);
-
-                        if (configuration.getFilesFacade().isRestrictedFileSystem()) {
-                            reader.closeColumnForRemove("sym");
-                        }
 
                         writer.removeColumn("sym");
                         writer.addColumn("sym", ColumnType.SYMBOL);
@@ -4391,12 +4217,10 @@ public class TableReaderTest extends AbstractCairoTest {
             long timestampUs = TimestampFormatUtils.parseTimestamp("2017-12-11T00:00:00.000Z");
 
             // model table
-            try (TableModel model = new TableModel(configuration, tableName, partitionBy).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, tableName, partitionBy).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, tableName, metrics)) {
-
+            try (TableWriter writer = newOffPoolWriter(configuration, tableName)) {
                 for (int k = 0; k < N_PARTITIONS; k++) {
                     long band = k * bandStride;
                     for (int i = 0; i < N; i++) {
@@ -4412,12 +4236,12 @@ public class TableReaderTest extends AbstractCairoTest {
                 final int expectedSize = N_PARTITIONS * N;
                 Assert.assertEquals(expectedSize, writer.size());
 
-
                 // now open table reader having partition gap
-                try (TableReader reader = newTableReader(configuration, tableName)) {
-
+                try (
+                        TableReader reader = newOffPoolReader(configuration, tableName);
+                        TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                ) {
                     Assert.assertEquals(expectedSize, reader.size());
-                    RecordCursor cursor = reader.getCursor();
                     Record record = cursor.getRecord();
                     while (cursor.hasNext()) {
                         record.getLong(0);
@@ -4428,7 +4252,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     DateFormat fmt = PartitionBy.getPartitionDirFormatMethod(partitionBy);
                     Assert.assertTrue(
                             // active partition
-                            writer.removePartition(fmt.parse(partitionNameToDelete, null))
+                            writer.removePartition(fmt.parse(partitionNameToDelete, DateFormatUtils.EN_LOCALE))
                     );
 
                     // check writer
@@ -4439,7 +4263,7 @@ public class TableReaderTest extends AbstractCairoTest {
                     reader.reload();
                     totalCount = 0;
                     Assert.assertEquals(newExpectedSize, reader.size());
-                    cursor = reader.getCursor();
+                    cursor.toTop();
                     record = cursor.getRecord();
                     while (cursor.hasNext()) {
                         record.getLong(0);
@@ -4461,12 +4285,10 @@ public class TableReaderTest extends AbstractCairoTest {
             int totalCount = 0;
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
-
+            try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                 for (int k = 0; k < N_PARTITIONS; k++) {
                     long band = k * bandStride;
                     for (int i = 0; i < N; i++) {
@@ -4482,7 +4304,7 @@ public class TableReaderTest extends AbstractCairoTest {
                 Assert.assertEquals(N * N_PARTITIONS, writer.size());
 
                 DateFormat fmt = PartitionBy.getPartitionDirFormatMethod(partitionBy);
-                final long timestamp = fmt.parse(partitionNameToDelete, null);
+                final long timestamp = fmt.parse(partitionNameToDelete, DateFormatUtils.EN_LOCALE);
 
                 Assert.assertTrue(writer.removePartition(timestamp));
                 Assert.assertFalse(writer.removePartition(timestamp));
@@ -4491,13 +4313,14 @@ public class TableReaderTest extends AbstractCairoTest {
             }
 
             // now open table reader having partition gap
-            try (TableReader reader = newTableReader(configuration, "w")) {
-
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "w");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 Assert.assertEquals(N * (N_PARTITIONS - 1), reader.size());
 
                 int previousBand = -1;
                 int bandCount = 0;
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 while (cursor.hasNext()) {
                     long value = record.getLong(0);
@@ -4531,12 +4354,10 @@ public class TableReaderTest extends AbstractCairoTest {
             int totalCount = 0;
 
             // model table
-            try (TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp()) {
-                CreateTableTestUtils.create(model);
-            }
+            TableModel model = new TableModel(configuration, "w", partitionBy).col("l", ColumnType.LONG).timestamp();
+            AbstractCairoTest.create(model);
 
-            try (TableWriter writer = newTableWriter(configuration, "w", metrics)) {
-
+            try (TableWriter writer = newOffPoolWriter(configuration, "w")) {
                 for (int k = 0; k < N_PARTITIONS; k++) {
                     long band = k * bandStride;
                     for (int i = 0; i < N; i++) {
@@ -4552,10 +4373,11 @@ public class TableReaderTest extends AbstractCairoTest {
                 Assert.assertEquals(N * N_PARTITIONS, writer.size());
 
                 // now open table reader having partition gap
-                try (TableReader reader = newTableReader(configuration, "w")) {
-
+                try (
+                        TableReader reader = newOffPoolReader(configuration, "w");
+                        TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                ) {
                     Assert.assertEquals(N * N_PARTITIONS, reader.size());
-                    RecordCursor cursor = reader.getCursor();
                     Record record = cursor.getRecord();
                     while (cursor.hasNext()) {
                         record.getLong(0);
@@ -4563,10 +4385,9 @@ public class TableReaderTest extends AbstractCairoTest {
                     }
                     Assert.assertEquals(N * N_PARTITIONS, totalCount);
 
-
                     DateFormat fmt = PartitionBy.getPartitionDirFormatMethod(partitionBy);
                     Assert.assertTrue(
-                            writer.removePartition(fmt.parse(partitionNameToDelete, null))
+                            writer.removePartition(fmt.parse(partitionNameToDelete, DateFormatUtils.EN_LOCALE))
                     );
 
                     Assert.assertEquals(N * (N_PARTITIONS - 1), writer.size());
@@ -4579,7 +4400,7 @@ public class TableReaderTest extends AbstractCairoTest {
 
                     int previousBand = -1;
                     int bandCount = 0;
-                    cursor = reader.getCursor();
+                    cursor.toTop();
                     record = cursor.getRecord();
                     while (cursor.hasNext()) {
                         long value = record.getLong(0);
@@ -4604,6 +4425,59 @@ public class TableReaderTest extends AbstractCairoTest {
         });
     }
 
+    private void testRemoveSymbol(AtomicInteger counterRef, TestFilesFacade ff, String columnName, int deleteAttempts) throws Exception {
+        Rnd rnd = new Rnd();
+        final int N = 1000;
+        assertMemoryLeak(
+                ff, () -> {
+                    // populate table and delete column
+                    try (TableWriter writer = getWriter("x")) {
+                        appendTwoSymbols(writer, rnd, 1);
+                        writer.commit();
+
+                        try (
+                                TableReader reader = getReader("x");
+                                TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+                        ) {
+                            long counter = 0;
+
+                            rnd.reset();
+                            final Record record = cursor.getRecord();
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                Assert.assertEquals(rnd.nextChars(15), record.getSymA(1));
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+
+                            // this should write metadata without column "b" but will ignore
+                            // file delete failures
+                            writer.removeColumn(columnName);
+
+                            Assert.assertTrue(reader.reload());
+
+                            Assert.assertEquals(N, reader.size());
+
+                            rnd.reset();
+                            cursor.toTop();
+                            counter = 0;
+                            while (cursor.hasNext()) {
+                                Assert.assertEquals(rnd.nextChars(10), record.getSymA(0));
+                                // roll random generator to make sure it returns same values
+                                rnd.nextChars(15);
+                                counter++;
+                            }
+
+                            Assert.assertEquals(N, counter);
+                        }
+                    }
+
+                    checkColumnPurgeRemovesFiles(counterRef, ff, deleteAttempts);
+                }
+        );
+    }
+
     private void testTableCursor(long inc) throws NumericException {
         Rnd rnd = new Rnd();
         int N = 100;
@@ -4612,10 +4486,12 @@ public class TableReaderTest extends AbstractCairoTest {
         try {
             testAppend(rnd, configuration, ts, N, inc, blob, 0);
             final LongList rows = new LongList();
-            try (TableReader reader = newTableReader(configuration, "all")) {
+            try (
+                    TableReader reader = newOffPoolReader(configuration, "all");
+                    TestTableReaderRecordCursor cursor = new TestTableReaderRecordCursor().of(reader)
+            ) {
                 Assert.assertEquals(N, reader.size());
 
-                RecordCursor cursor = reader.getCursor();
                 final Record record = cursor.getRecord();
                 assertCursor(cursor, ts, inc, blob, N, BATCH1_ASSERTER);
 

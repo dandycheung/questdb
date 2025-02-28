@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,55 +26,65 @@ package io.questdb.tasks;
 
 import io.questdb.Telemetry;
 import io.questdb.TelemetryOrigin;
-import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.CairoException;
 import io.questdb.cairo.TableWriter;
+import io.questdb.griffin.QueryBuilder;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
 import io.questdb.std.ObjectFactory;
 
 public class TelemetryTask implements AbstractTelemetryTask {
+    public static final String NAME = "TABLE TELEMETRY";
     public static final String TABLE_NAME = "telemetry";
 
     private static final Log LOG = LogFactory.getLog(TelemetryTask.class);
-    public static final Telemetry.TelemetryTypeBuilder<TelemetryTask> TELEMETRY = new Telemetry.TelemetryTypeBuilder<TelemetryTask>() {
+    public static final Telemetry.TelemetryTypeBuilder<TelemetryTask> TELEMETRY = configuration -> new Telemetry.TelemetryType<>() {
+        private final TelemetryTask systemStatusTask = new TelemetryTask();
+
         @Override
-        public Telemetry.TelemetryType<TelemetryTask> build(CairoConfiguration configuration) {
-            return new Telemetry.TelemetryType<TelemetryTask>() {
-                private final TelemetryTask systemStatusTask = new TelemetryTask();
+        public QueryBuilder getCreateSql(QueryBuilder builder) {
+            return builder
+                    .$("CREATE TABLE IF NOT EXISTS \"")
+                    .$(TABLE_NAME)
+                    .$("\" (" +
+                            "created TIMESTAMP, " +
+                            "event SHORT, " +
+                            "origin SHORT" +
+                            ") TIMESTAMP(created) PARTITION BY DAY TTL 1 WEEK BYPASS WAL"
+                    );
+        }
 
-                @Override
-                public String getCreateSql() {
-                    // Telemetry table will not have sys. prefix for compatibility.
-                    return "CREATE TABLE IF NOT EXISTS \"" + TABLE_NAME + "\" (" +
-                            "created timestamp, " +
-                            "event short, " +
-                            "origin short" +
-                            ") timestamp(created)";
-                }
+        @Override
+        public String getName() {
+            return NAME;
+        }
 
-                @Override
-                public String getTableName() {
-                    return TABLE_NAME;
-                }
+        @Override
+        public String getTableName() {
+            return TABLE_NAME;
+        }
 
-                @Override
-                public ObjectFactory<TelemetryTask> getTaskFactory() {
-                    return TelemetryTask::new;
-                }
+        @Override
+        public ObjectFactory<TelemetryTask> getTaskFactory() {
+            return TelemetryTask::new;
+        }
 
-                @Override
-                public void logStatus(TableWriter writer, short systemStatus, long micros) {
-                    systemStatusTask.origin = TelemetryOrigin.INTERNAL;
-                    systemStatusTask.event = systemStatus;
-                    systemStatusTask.writeTo(writer, micros);
-                    writer.commit();
-                }
-            };
+        @Override
+        public void logStatus(TableWriter writer, short systemStatus, long micros) {
+            systemStatusTask.origin = TelemetryOrigin.INTERNAL;
+            systemStatusTask.event = systemStatus;
+            systemStatusTask.writeTo(writer, micros);
+            writer.commit();
+        }
+
+        @Override
+        public boolean shouldLogClasses() {
+            return true;
         }
     };
     private short event;
     private short origin;
+    private long queueCursor;
 
     private TelemetryTask() {
     }
@@ -84,8 +94,17 @@ public class TelemetryTask implements AbstractTelemetryTask {
         if (task != null) {
             task.origin = origin;
             task.event = event;
-            telemetry.store();
+            telemetry.store(task);
         }
+    }
+
+    public long getQueueCursor() {
+        return queueCursor;
+    }
+
+    @Override
+    public void setQueueCursor(long cursor) {
+        this.queueCursor = cursor;
     }
 
     @Override

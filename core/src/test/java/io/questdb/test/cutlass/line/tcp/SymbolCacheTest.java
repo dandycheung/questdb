@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,29 +24,45 @@
 
 package io.questdb.test.cutlass.line.tcp;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.AlterTableContextException;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.SecurityContext;
+import io.questdb.cairo.TableReader;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.TableUtils;
+import io.questdb.cairo.TableWriter;
+import io.questdb.cairo.TableWriterAPI;
+import io.questdb.cairo.TxReader;
 import io.questdb.cairo.sql.SymbolTable;
 import io.questdb.cairo.sql.TableRecordMetadata;
 import io.questdb.cairo.vm.Vm;
 import io.questdb.cairo.vm.api.MemoryMR;
 import io.questdb.cutlass.line.tcp.DefaultLineTcpReceiverConfiguration;
 import io.questdb.cutlass.line.tcp.SymbolCache;
-import io.questdb.test.AbstractGriffinTest;
 import io.questdb.griffin.engine.ops.AlterOperation;
 import io.questdb.griffin.engine.ops.UpdateOperation;
 import io.questdb.mp.RingQueue;
 import io.questdb.mp.SCSequence;
 import io.questdb.mp.SOCountDownLatch;
 import io.questdb.mp.SPSequence;
-import io.questdb.std.*;
+import io.questdb.std.FilesFacade;
+import io.questdb.std.FilesFacadeImpl;
+import io.questdb.std.MemoryTag;
+import io.questdb.std.Misc;
+import io.questdb.std.Mutable;
+import io.questdb.std.ObjList;
+import io.questdb.std.Rnd;
+import io.questdb.std.Unsafe;
 import io.questdb.std.datetime.microtime.TimestampFormatUtils;
 import io.questdb.std.datetime.microtime.Timestamps;
-import io.questdb.std.str.DirectByteCharSequence;
+import io.questdb.std.str.DirectUtf8String;
 import io.questdb.std.str.Path;
-import io.questdb.test.CreateTableTestUtils;
+import io.questdb.test.AbstractCairoTest;
 import io.questdb.test.cairo.TableModel;
 import io.questdb.test.std.TestFilesFacadeImpl;
 import io.questdb.test.tools.TestUtils;
+import org.jetbrains.annotations.NotNull;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -58,7 +74,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 import static io.questdb.cairo.TableUtils.TXN_FILE_NAME;
 
-public class SymbolCacheTest extends AbstractGriffinTest {
+public class SymbolCacheTest extends AbstractCairoTest {
 
     private static final long DBCS_MAX_SIZE = 256;
 
@@ -102,23 +118,24 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     exceptions.add(e);
                     LOG.error().$(e).$();
                 } finally {
+                    Path.clearThreadLocals();
                     done.incrementAndGet();
                 }
             });
 
             Thread readerThread = new Thread(() -> {
                 ObjList<SymbolCache> symbolCacheObjList = new ObjList<>();
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
+                DirectUtf8String dus = new DirectUtf8String();
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                TableToken tableToken = engine.getTableToken(tableName);
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (Path path = new Path();
                      TxReader txReader = new TxReader(configuration.getFilesFacade()).ofRO(
-                             path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                             path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                              PartitionBy.DAY
                      );
                      TableReader rdr = getReader(tableName)
                 ) {
-                    path.of(configuration.getRoot()).concat(tableToken);
+                    path.of(configuration.getDbRoot()).concat(tableToken);
                     start.await();
                     int colAdded = 0, newColsAdded;
                     while (colAdded < totalColAddCount) {
@@ -140,10 +157,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                         }
 
                         int symCount = symbolCacheObjList.size();
-                        copyUtf8StringChars("val" + ((newColsAdded - 1) * rowsAdded), mem, dbcs);
+                        copyUtf8StringChars("val" + ((newColsAdded - 1) * rowsAdded), mem, dus);
                         boolean found = false;
                         for (int sym = 0; sym < symCount; sym++) {
-                            if (symbolCacheObjList.getQuick(sym).keyOf(dbcs) != SymbolTable.VALUE_NOT_FOUND) {
+                            if (symbolCacheObjList.getQuick(sym).keyOf(dus) != SymbolTable.VALUE_NOT_FOUND) {
                                 found = true;
                             }
                         }
@@ -157,6 +174,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     LOG.error().$(e).$();
                 } finally {
                     Misc.freeObjList(symbolCacheObjList);
+                    Path.clearThreadLocals();
                     Unsafe.free(mem, DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
                 }
             });
@@ -166,7 +184,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
             writerThread.join();
             readerThread.join();
 
-            if (exceptions.size() != 0) {
+            if (!exceptions.isEmpty()) {
                 for (Throwable ex : exceptions) {
                     ex.printStackTrace();
                 }
@@ -185,23 +203,23 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path();
-                 TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
-                         .col("symCol", ColumnType.SYMBOL);
                  SymbolCache cache = new SymbolCache(new DefaultLineTcpReceiverConfiguration() {
                      @Override
-                     public long getSymbolCacheWaitUsBeforeReload() {
+                     public long getSymbolCacheWaitBeforeReload() {
                          return 0;
                      }
                  })
             ) {
-                CreateTableTestUtils.create(model);
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
+                TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
+                        .col("symCol", ColumnType.SYMBOL);
+                AbstractCairoTest.create(model);
+                DirectUtf8String dus = new DirectUtf8String();
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                TableToken tableToken = engine.getTableToken(tableName);
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (
-                        TableWriter writer = newTableWriter(configuration, tableName, metrics);
+                        TableWriter writer = newOffPoolWriter(configuration, tableName);
                         TxReader txReader = new TxReader(ff).ofRO(
-                                path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                                path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                                 PartitionBy.DAY
                         )
                 ) {
@@ -211,7 +229,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             configuration,
                             writer,
                             symColIndex,
-                            path.of(configuration.getRoot()).concat(tableToken),
+                            path.of(configuration.getDbRoot()).concat(tableToken),
                             "symCol",
                             symColIndex,
                             txReader,
@@ -229,8 +247,8 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.commit();
 
                     for (int i = 0; i < N; i++) {
-                        copyUtf8StringChars("sym" + i, mem, dbcs);
-                        int rc = cache.keyOf(dbcs);
+                        copyUtf8StringChars("sym" + i, mem, dus);
+                        int rc = cache.keyOf(dus);
                         Assert.assertNotEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     }
 
@@ -258,21 +276,21 @@ public class SymbolCacheTest extends AbstractGriffinTest {
             final long incrementUs = 10_000;
             final String constValue = "hello";
             long constMem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-            DirectByteCharSequence constDbcs = new DirectByteCharSequence();
-            copyUtf8StringChars(constValue, constMem, constDbcs);
+            DirectUtf8String constDus = new DirectUtf8String();
+            copyUtf8StringChars(constValue, constMem, constDus);
             FilesFacade ff = new TestFilesFacadeImpl();
 
-            compiler.compile("create table x(a symbol, c int, b symbol capacity 10000000, ts timestamp) timestamp(ts) partition by DAY", sqlExecutionContext);
-            TableToken tableToken = engine.getTableToken("x");
+            execute("create table x(a symbol, c int, b symbol capacity 10000000, ts timestamp) timestamp(ts) partition by DAY");
+            TableToken tableToken = engine.verifyTableName("x");
             try (
                     SymbolCache symbolCache = new SymbolCache(new DefaultLineTcpReceiverConfiguration());
                     Path path = new Path();
                     TxReader txReader = new TxReader(ff).ofRO(
-                            path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                            path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                             PartitionBy.DAY
                     )
             ) {
-                path.of(configuration.getRoot()).concat(tableToken);
+                path.of(configuration.getDbRoot()).concat(tableToken);
                 symbolCache.of(configuration, new TestTableWriterAPI(), 1, path, "b", 1, txReader, -1);
 
                 final CyclicBarrier barrier = new CyclicBarrier(2);
@@ -286,21 +304,21 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
                     new Thread(() -> {
                         long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                        DirectByteCharSequence dbcs = new DirectByteCharSequence();
+                        DirectUtf8String dus = new DirectUtf8String();
                         try {
                             barrier.await();
                             for (int i = 0; i < N; i++) {
                                 // All keys should not be found, but we keep looking them up because
                                 // we pretend we don't know this upfront. The aim is to cause
                                 // race condition between lookup and table writer
-                                copyUtf8StringChars(rndCache.nextString(5), mem, dbcs);
-                                symbolCache.keyOf(constDbcs);
-                                symbolCache.keyOf(dbcs);
+                                copyUtf8StringChars(rndCache.nextString(5), mem, dus);
+                                symbolCache.keyOf(constDus);
+                                symbolCache.keyOf(dus);
                                 final long cursor = pubSeq.nextBully();
                                 final Holder h = wheel.get(cursor);
                                 // publish the value2 to the table writer
                                 h.value1 = constValue;
-                                h.value2 = Chars.toString(dbcs);
+                                h.value2 = dus.toString();
                                 pubSeq.done(cursor);
                             }
                         } catch (Throwable e) {
@@ -353,7 +371,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
             } finally {
                 Unsafe.free(constMem, DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
             }
-            compiler.compile("drop table x", sqlExecutionContext);
+            execute("drop table x");
         });
     }
 
@@ -366,23 +384,23 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path();
-                 TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
-                         .col("symCol", ColumnType.SYMBOL);
                  SymbolCache cache = new SymbolCache(new DefaultLineTcpReceiverConfiguration() {
                      @Override
-                     public long getSymbolCacheWaitUsBeforeReload() {
+                     public long getSymbolCacheWaitBeforeReload() {
                          return 0;
                      }
                  })
             ) {
-                CreateTableTestUtils.create(model);
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
+                TableModel model = new TableModel(configuration, tableName, PartitionBy.HOUR)
+                        .col("symCol", ColumnType.SYMBOL);
+                AbstractCairoTest.create(model);
+                DirectUtf8String dus = new DirectUtf8String();
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                TableToken tableToken = engine.getTableToken(tableName);
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (
-                        TableWriter writer = new TableWriter(configuration, tableToken, metrics);
+                        TableWriter writer = TestUtils.newOffPoolWriter(configuration, tableToken, engine);
                         TxReader txReader = new TxReader(ff).ofRO(
-                                path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                                path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                                 PartitionBy.DAY
                         )
                 ) {
@@ -392,7 +410,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             configuration,
                             writer,
                             symColIndex,
-                            path.of(configuration.getRoot()).concat(tableToken),
+                            path.of(configuration.getDbRoot()).concat(tableToken),
                             "symCol",
                             symColIndex,
                             txReader,
@@ -410,8 +428,8 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.commit();
 
                     for (int i = 0; i < N; i++) {
-                        copyUtf8StringChars(symbolPrefix + i, mem, dbcs);
-                        int rc = cache.keyOf(dbcs);
+                        copyUtf8StringChars(symbolPrefix + i, mem, dus);
+                        int rc = cache.keyOf(dus);
                         Assert.assertNotEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     }
 
@@ -429,25 +447,25 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         FilesFacade ff = new TestFilesFacadeImpl();
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path();
-                 TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
-                         .col("symCol1", ColumnType.SYMBOL)
-                         .col("symCol2", ColumnType.SYMBOL);
                  SymbolCache cache = new SymbolCache(new DefaultLineTcpReceiverConfiguration() {
                      @Override
-                     public long getSymbolCacheWaitUsBeforeReload() {
+                     public long getSymbolCacheWaitBeforeReload() {
                          return 0;
                      }
                  })
             ) {
-                CreateTableTestUtils.create(model);
+                TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
+                        .col("symCol1", ColumnType.SYMBOL)
+                        .col("symCol2", ColumnType.SYMBOL);
+                AbstractCairoTest.create(model);
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
-                TableToken tableToken = engine.getTableToken(tableName);
+                DirectUtf8String dus = new DirectUtf8String();
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (
-                        TableWriter writer = newTableWriter(configuration, tableName, metrics);
-                        MemoryMR txMem = Vm.getMRInstance();
+                        TableWriter writer = newOffPoolWriter(configuration, tableName);
+                        MemoryMR txMem = Vm.getCMRInstance();
                         TxReader txReader = new TxReader(ff).ofRO(
-                                path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                                path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                                 PartitionBy.DAY
                         )
                 ) {
@@ -457,7 +475,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
                     txMem.of(
                             configuration.getFilesFacade(),
-                            path,
+                            path.$(),
                             transientSymCountOffset + Integer.BYTES,
                             transientSymCountOffset + Integer.BYTES,
                             MemoryTag.MMAP_DEFAULT
@@ -467,7 +485,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             configuration,
                             new TestTableWriterAPI(),
                             symColIndex2,
-                            path.of(configuration.getRoot()).concat(tableToken),
+                            path.of(configuration.getDbRoot()).concat(tableToken),
                             "symCol2",
                             symColIndex2,
                             txReader,
@@ -485,10 +503,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     Assert.assertEquals(1, txReader.unsafeReadSymbolCount(1));
                     Assert.assertEquals(1, txReader.unsafeReadSymbolTransientCount(1));
 
-                    int rc = cache.keyOf(copyUtf8StringChars("missing", mem, dbcs));
+                    int rc = cache.keyOf(copyUtf8StringChars("missing", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(0, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dus));
                     Assert.assertEquals(0, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
 
@@ -499,10 +517,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.commit();
                     Assert.assertEquals(1, txReader.unsafeReadSymbolCount(1));
                     Assert.assertEquals(1, txReader.unsafeReadSymbolTransientCount(1));
-                    rc = cache.keyOf(copyUtf8StringChars("missing", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("missing", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dus));
                     Assert.assertEquals(0, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
 
@@ -515,10 +533,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.commit();
                     Assert.assertEquals(1, txReader.unsafeReadSymbolCount(1));
                     Assert.assertEquals(2, txReader.unsafeReadSymbolTransientCount(1));
-                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym21", mem, dus));
                     Assert.assertEquals(0, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym22", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym22", mem, dus));
                     Assert.assertEquals(1, rc);
                     Assert.assertEquals(2, cache.getCacheValueCount());
 
@@ -537,10 +555,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     r.putSym(symColIndex2, "sym25");
                     r.append();
 
-                    rc = cache.keyOf(copyUtf8StringChars("sym22", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym22", mem, dus));
                     Assert.assertEquals(1, rc);
                     Assert.assertEquals(2, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym24", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym24", mem, dus));
                     Assert.assertEquals(3, rc);
                     Assert.assertEquals(3, cache.getCacheValueCount());
                     writer.commit();
@@ -549,7 +567,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.removeColumn("symCol1");
                     cache.close();
                     txMem.close();
-                    path.of(configuration.getRoot()).concat(tableToken);
+                    path.of(configuration.getDbRoot()).concat(tableToken);
 
                     cache.of(
                             configuration,
@@ -562,18 +580,18 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             -1
                     );
 
-                    rc = cache.keyOf(copyUtf8StringChars("sym24", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym24", mem, dus));
                     Assert.assertEquals(3, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
 
                     r = writer.newRow();
                     r.putSym(symColIndex2, "sym26");
                     r.append();
-                    rc = cache.keyOf(copyUtf8StringChars("sym26", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym26", mem, dus));
                     Assert.assertEquals(5, rc);
                     Assert.assertEquals(2, cache.getCacheValueCount());
                     writer.commit();
-                    rc = cache.keyOf(copyUtf8StringChars("sym26", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym26", mem, dus));
                     Assert.assertEquals(5, rc);
                     Assert.assertEquals(2, cache.getCacheValueCount());
                 } finally {
@@ -589,24 +607,24 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         FilesFacade ff = new TestFilesFacadeImpl();
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path();
-                 TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
-                         .col("symCol", ColumnType.SYMBOL);
                  SymbolCache cache = new SymbolCache(new DefaultLineTcpReceiverConfiguration() {
                      @Override
-                     public long getSymbolCacheWaitUsBeforeReload() {
+                     public long getSymbolCacheWaitBeforeReload() {
                          return 0;
                      }
                  })
             ) {
-                CreateTableTestUtils.create(model);
+                TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
+                        .col("symCol", ColumnType.SYMBOL);
+                AbstractCairoTest.create(model);
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
-                TableToken tableToken = engine.getTableToken(tableName);
+                DirectUtf8String dus = new DirectUtf8String();
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (
-                        TableWriter writer = newTableWriter(configuration, tableName, metrics);
-                        MemoryMR txMem = Vm.getMRInstance();
+                        TableWriter writer = newOffPoolWriter(configuration, tableName);
+                        MemoryMR txMem = Vm.getCMRInstance();
                         TxReader txReader = new TxReader(ff).ofRO(
-                                path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                                path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                                 PartitionBy.DAY
                         )
                 ) {
@@ -615,7 +633,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
                     txMem.of(
                             configuration.getFilesFacade(),
-                            path,
+                            path.$(),
                             transientSymCountOffset + Integer.BYTES,
                             transientSymCountOffset + Integer.BYTES,
                             MemoryTag.MMAP_DEFAULT
@@ -633,17 +651,17 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             configuration,
                             new TestTableWriterAPI(1),
                             symColIndex,
-                            path.of(configuration.getRoot()).concat(tableToken),
+                            path.of(configuration.getDbRoot()).concat(tableToken),
                             "symCol",
                             symColIndex,
                             txReader,
                             -1
                     );
 
-                    int rc = cache.keyOf(copyUtf8StringChars("missing", mem, dbcs));
+                    int rc = cache.keyOf(copyUtf8StringChars("missing", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(0, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym1", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym1", mem, dus));
                     Assert.assertEquals(0, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
 
@@ -653,10 +671,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                     writer.commit();
                     Assert.assertEquals(1, txReader.unsafeReadSymbolCount(0));
                     Assert.assertEquals(2, txReader.unsafeReadSymbolTransientCount(0));
-                    rc = cache.keyOf(copyUtf8StringChars("missing", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("missing", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
-                    rc = cache.keyOf(copyUtf8StringChars("sym2", mem, dbcs));
+                    rc = cache.keyOf(copyUtf8StringChars("sym2", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(1, cache.getCacheValueCount());
                 } finally {
@@ -672,24 +690,24 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         FilesFacade ff = new TestFilesFacadeImpl();
         TestUtils.assertMemoryLeak(() -> {
             try (Path path = new Path();
-                 TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
-                         .col("symCol", ColumnType.SYMBOL);
                  SymbolCache cache = new SymbolCache(new DefaultLineTcpReceiverConfiguration() {
                      @Override
-                     public long getSymbolCacheWaitUsBeforeReload() {
+                     public long getSymbolCacheWaitBeforeReload() {
                          return 0;
                      }
                  })
             ) {
-                CreateTableTestUtils.create(model);
+                TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
+                        .col("symCol", ColumnType.SYMBOL);
+                AbstractCairoTest.create(model);
                 long mem = Unsafe.malloc(DBCS_MAX_SIZE, MemoryTag.NATIVE_DEFAULT);
-                DirectByteCharSequence dbcs = new DirectByteCharSequence();
-                TableToken tableToken = engine.getTableToken(tableName);
+                DirectUtf8String dus = new DirectUtf8String();
+                TableToken tableToken = engine.verifyTableName(tableName);
                 try (
-                        TableWriter writer = newTableWriter(configuration, tableName, metrics);
-                        MemoryMR txMem = Vm.getMRInstance();
+                        TableWriter writer = newOffPoolWriter(configuration, tableName);
+                        MemoryMR txMem = Vm.getCMRInstance();
                         TxReader txReader = new TxReader(ff).ofRO(
-                                path.of(configuration.getRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
+                                path.of(configuration.getDbRoot()).concat(tableToken).concat(TXN_FILE_NAME).$(),
                                 PartitionBy.DAY
                         )
                 ) {
@@ -698,7 +716,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
                     txMem.of(
                             configuration.getFilesFacade(),
-                            path,
+                            path.$(),
                             transientSymCountOffset + Integer.BYTES,
                             transientSymCountOffset + Integer.BYTES,
                             MemoryTag.MMAP_DEFAULT
@@ -716,14 +734,14 @@ public class SymbolCacheTest extends AbstractGriffinTest {
                             configuration,
                             new TestTableWriterAPI(0),
                             symColIndex,
-                            path.of(configuration.getRoot()).concat(tableToken),
+                            path.of(configuration.getDbRoot()).concat(tableToken),
                             "symCol",
                             symColIndex,
                             txReader,
                             -1
                     );
 
-                    int rc = cache.keyOf(copyUtf8StringChars("sym1", mem, dbcs));
+                    int rc = cache.keyOf(copyUtf8StringChars("sym1", mem, dus));
                     Assert.assertEquals(SymbolTable.VALUE_NOT_FOUND, rc);
                     Assert.assertEquals(0, cache.getCacheValueCount());
                 } finally {
@@ -733,22 +751,19 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         });
     }
 
-    private static DirectByteCharSequence copyUtf8StringChars(String value, long mem, DirectByteCharSequence dbcs) {
+    private static DirectUtf8String copyUtf8StringChars(String value, long mem, DirectUtf8String dus) {
         byte[] utf8Bytes = value.getBytes(StandardCharsets.UTF_8);
         Assert.assertTrue(utf8Bytes.length <= DBCS_MAX_SIZE);
         for (int i = 0, n = utf8Bytes.length; i < n; i++) {
             Unsafe.getUnsafe().putByte(mem + i, utf8Bytes[i]);
         }
-        return dbcs.of(mem, mem + utf8Bytes.length);
+        return dus.of(mem, mem + utf8Bytes.length);
     }
 
     private void createTable(String tableName) {
-        try (
-                TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY)
-        ) {
-            model.timestamp();
-            TestUtils.create(model, engine);
-        }
+        TableModel model = new TableModel(configuration, tableName, PartitionBy.DAY);
+        model.timestamp();
+        TestUtils.createTable(engine, model);
     }
 
     private static class Holder implements Mutable {
@@ -775,11 +790,11 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         }
 
         @Override
-        public void addColumn(CharSequence columnName, int columnType) {
+        public void addColumn(@NotNull CharSequence columnName, int columnType, SecurityContext securityContext) {
         }
 
         @Override
-        public void addColumn(CharSequence columnName, int columnType, int symbolCapacity, boolean symbolCacheFlag, boolean isIndexed, int indexValueBlockCapacity) {
+        public void addColumn(CharSequence columnName, int columnType, int symbolCapacity, boolean symbolCacheFlag, boolean isIndexed, int indexValueBlockCapacity, boolean isSequential) {
         }
 
         @Override
@@ -797,8 +812,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         }
 
         @Override
-        public long commit() {
-            return 0;
+        public void commit() {
         }
 
         @Override
@@ -807,7 +821,7 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         }
 
         @Override
-        public long getStructureVersion() {
+        public long getMetadataVersion() {
             return 0;
         }
 
@@ -845,6 +859,11 @@ public class SymbolCacheTest extends AbstractGriffinTest {
         }
 
         @Override
+        public TableWriter.Row newRowDeferTimestamp() {
+            throw new UnsupportedOperationException();
+        }
+
+        @Override
         public void rollback() {
         }
 
@@ -855,6 +874,10 @@ public class SymbolCacheTest extends AbstractGriffinTest {
 
         @Override
         public void truncate() {
+        }
+
+        @Override
+        public void truncateSoft() {
         }
     }
 }

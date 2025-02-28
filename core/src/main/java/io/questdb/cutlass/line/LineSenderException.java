@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,7 +32,7 @@ public class LineSenderException extends RuntimeException {
     private final StringSink message = new StringSink();
     private int errno = Integer.MIN_VALUE;
 
-    public LineSenderException(String message) {
+    public LineSenderException(CharSequence message) {
         this.message.put(message);
     }
 
@@ -65,6 +65,11 @@ public class LineSenderException extends RuntimeException {
             return errNoRender;
         }
         return errNoRender + " " + message;
+    }
+
+    public LineSenderException put(char ch) {
+        message.put(ch);
+        return this;
     }
 
     public LineSenderException put(long value) {

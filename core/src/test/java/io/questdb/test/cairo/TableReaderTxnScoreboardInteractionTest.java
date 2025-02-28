@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,9 +24,13 @@
 
 package io.questdb.test.cairo;
 
-import io.questdb.cairo.*;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.PartitionBy;
+import io.questdb.cairo.TableReader;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.TableWriter;
+import io.questdb.cairo.TxnScoreboard;
 import io.questdb.test.AbstractCairoTest;
-import io.questdb.test.CreateTableTestUtils;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -114,24 +118,24 @@ public class TableReaderTxnScoreboardInteractionTest extends AbstractCairoTest {
         assertMemoryLeak(() -> {
             createTable();
 
-            try (TableReader reader = newTableReader(configuration, "x")) {
+            try (TableReader reader = newOffPoolReader(configuration, "x")) {
                 TxnScoreboard txnScoreboard = reader.getTxnScoreboard();
                 // when table is empty the "min" is set to max long
                 Assert.assertEquals(0, txnScoreboard.getMin());
                 Assert.assertEquals(0, reader.getTxn());
             }
 
-            try (TableWriter w = newTableWriter(configuration, "x", metrics)) {
-                addRow(w);
+            try (TableWriter writer = newOffPoolWriter(configuration, "x")) {
+                addRow(writer);
 
-                final TxnScoreboard txnScoreboard = w.getTxnScoreboard();
+                final TxnScoreboard txnScoreboard = writer.getTxnScoreboard();
 
-                try (TableReader reader = newTableReader(configuration, "x")) {
+                try (TableReader reader = newOffPoolReader(configuration, "x")) {
                     Assert.assertEquals(1, reader.getTxn());
                     Assert.assertEquals(1, txnScoreboard.getMin());
                     Assert.assertEquals(1, txnScoreboard.getActiveReaderCount(1));
 
-                    addRow(w);
+                    addRow(writer);
 
                     Assert.assertEquals(1, reader.getTxn());
                     Assert.assertEquals(1, txnScoreboard.getMin());
@@ -159,11 +163,10 @@ public class TableReaderTxnScoreboardInteractionTest extends AbstractCairoTest {
     }
 
     private static TableToken createTable() {
-        try (TableModel model = new TableModel(configuration, "x", PartitionBy.NONE)) {
-            model
-                    .col("a", ColumnType.BYTE)
-                    .col("b", ColumnType.SHORT);
-            return CreateTableTestUtils.create(model);
-        }
+        TableModel model = new TableModel(configuration, "x", PartitionBy.NONE);
+        model
+                .col("a", ColumnType.BYTE)
+                .col("b", ColumnType.SHORT);
+        return AbstractCairoTest.create(model);
     }
 }

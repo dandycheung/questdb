@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -59,7 +59,7 @@ public class LineTcpConnectionContextBrokenUTF8Test extends BaseLineTcpContextTe
                             table + ",location=us-eastcoast temperature=80,hőmérséklet=25" + nonPrintable + ",hőmérséklet=23 1465839830102400200\n" +
                             table + ",location=us-westcost temperature=82 1465839830102500200\n";
 
-            handleContextIO();
+            handleContextIO0();
             Assert.assertEquals(disconnectOnError, disconnected);
             closeContext();
         });

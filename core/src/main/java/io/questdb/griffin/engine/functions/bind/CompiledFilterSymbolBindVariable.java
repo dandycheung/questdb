@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,12 +25,16 @@
 package io.questdb.griffin.engine.functions.bind;
 
 import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.sql.Function;
 import io.questdb.cairo.sql.Record;
-import io.questdb.cairo.sql.*;
+import io.questdb.cairo.sql.ScalarFunction;
+import io.questdb.cairo.sql.StaticSymbolTable;
+import io.questdb.cairo.sql.SymbolTableSource;
 import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
 import io.questdb.griffin.engine.functions.SymbolFunction;
+import org.jetbrains.annotations.Nullable;
 
 /**
  * String bind variable function wrapper used in SQL JIT. Also used to handle deferred
@@ -50,13 +54,18 @@ public class CompiledFilterSymbolBindVariable extends SymbolFunction implements 
 
     @Override
     public int getInt(Record rec) {
-        final CharSequence symbolStr = symbolFunction.getStr(null);
+        final CharSequence symbolStr = symbolFunction.getStrA(null);
         return symbolTable.keyOf(symbolStr);
     }
 
     @Override
+    public @Nullable StaticSymbolTable getStaticSymbolTable() {
+        return symbolTable;
+    }
+
+    @Override
     public CharSequence getSymbol(Record rec) {
-        return symbolFunction.getStr(null);
+        return symbolFunction.getStrA(null);
     }
 
     @Override
@@ -68,6 +77,11 @@ public class CompiledFilterSymbolBindVariable extends SymbolFunction implements 
     public void init(SymbolTableSource symbolTableSource, SqlExecutionContext executionContext) throws SqlException {
         this.symbolTable = (StaticSymbolTable) symbolTableSource.getSymbolTable(columnIndex);
         this.symbolFunction.init(symbolTableSource, executionContext);
+    }
+
+    @Override
+    public boolean isNonDeterministic() {
+        return true;
     }
 
     @Override

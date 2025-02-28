@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,7 +24,6 @@
 
 package io.questdb.griffin.engine.join;
 
-import io.questdb.cairo.AbstractRecordCursorFactory;
 import io.questdb.cairo.CairoConfiguration;
 import io.questdb.cairo.ColumnTypes;
 import io.questdb.cairo.RecordSink;
@@ -33,9 +32,7 @@ import io.questdb.cairo.map.MapFactory;
 import io.questdb.cairo.map.MapKey;
 import io.questdb.cairo.map.MapValue;
 import io.questdb.cairo.sql.Record;
-import io.questdb.cairo.sql.RecordCursor;
-import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.cairo.sql.RecordMetadata;
+import io.questdb.cairo.sql.*;
 import io.questdb.griffin.PlanSink;
 import io.questdb.griffin.SqlException;
 import io.questdb.griffin.SqlExecutionContext;
@@ -44,12 +41,9 @@ import io.questdb.std.Misc;
 import io.questdb.std.Numbers;
 import io.questdb.std.Transient;
 
-public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactory {
+public class AsOfJoinLightRecordCursorFactory extends AbstractJoinRecordCursorFactory {
     private final AsOfLightJoinRecordCursor cursor;
-    private final JoinContext joinContext;
-    private final RecordCursorFactory masterFactory;
     private final RecordSink masterKeySink;
-    private final RecordCursorFactory slaveFactory;
     private final RecordSink slaveKeySink;
 
     public AsOfJoinLightRecordCursorFactory(
@@ -58,27 +52,34 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
             RecordCursorFactory masterFactory,
             RecordCursorFactory slaveFactory,
             @Transient ColumnTypes joinColumnTypes,
-            @Transient ColumnTypes valueTypes, // this expected to be just LONG, we store chain references in map
+            @Transient ColumnTypes valueTypes, // this expected to be just 2 LONGs, we store chain references in map
             RecordSink masterKeySink,
             RecordSink slaveKeySink,
             int columnSplit,
             JoinContext joinContext
     ) {
-        super(metadata);
-        this.masterFactory = masterFactory;
-        this.slaveFactory = slaveFactory;
-        this.masterKeySink = masterKeySink;
-        this.slaveKeySink = slaveKeySink;
-        this.joinContext = joinContext;
+        super(metadata, joinContext, masterFactory, slaveFactory);
+        try {
+            this.masterKeySink = masterKeySink;
+            this.slaveKeySink = slaveKeySink;
 
-        Map joinKeyMap = MapFactory.createMap(configuration, joinColumnTypes, valueTypes);
-        this.cursor = new AsOfLightJoinRecordCursor(
-                columnSplit,
-                joinKeyMap,
-                NullRecordFactory.getInstance(slaveFactory.getMetadata()),
-                masterFactory.getMetadata().getTimestampIndex(),
-                slaveFactory.getMetadata().getTimestampIndex()
-        );
+            Map joinKeyMap = MapFactory.createUnorderedMap(configuration, joinColumnTypes, valueTypes);
+            this.cursor = new AsOfLightJoinRecordCursor(
+                    columnSplit,
+                    joinKeyMap,
+                    NullRecordFactory.getInstance(slaveFactory.getMetadata()),
+                    masterFactory.getMetadata().getTimestampIndex(),
+                    slaveFactory.getMetadata().getTimestampIndex()
+            );
+        } catch (Throwable th) {
+            close();
+            throw th;
+        }
+    }
+
+    @Override
+    public boolean followedOrderByAdvice() {
+        return masterFactory.followedOrderByAdvice();
     }
 
     @Override
@@ -116,10 +117,10 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
 
     @Override
     protected void _close() {
-        ((JoinRecordMetadata) getMetadata()).close();
-        masterFactory.close();
-        slaveFactory.close();
-        cursor.close();
+        Misc.freeIfCloseable(getMetadata());
+        Misc.free(masterFactory);
+        Misc.free(slaveFactory);
+        Misc.free(cursor);
     }
 
     private class AsOfLightJoinRecordCursor extends AbstractJoinCursor {
@@ -151,6 +152,11 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
         }
 
         @Override
+        public void calculateSize(SqlExecutionCircuitBreaker circuitBreaker, Counter counter) {
+            masterCursor.calculateSize(circuitBreaker, counter);
+        }
+
+        @Override
         public void close() {
             if (isOpen) {
                 isOpen = false;
@@ -175,8 +181,9 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
                 MapKey key;
                 MapValue value;
                 long slaveTimestamp = this.slaveTimestamp;
+                long slaveRowID = this.lastSlaveRowID;
                 if (slaveTimestamp <= masterTimestamp) {
-                    if (lastSlaveRowID != Numbers.LONG_NaN) {
+                    if (lastSlaveRowID != Numbers.LONG_NULL) {
                         slaveCursor.recordAt(slaveRecord, lastSlaveRowID);
                         key = joinKeyMap.withKey();
                         key.put(slaveRecord, slaveKeySink);
@@ -187,6 +194,7 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
                     final Record rec = slaveCursor.getRecord();
                     while (slaveCursor.hasNext()) {
                         slaveTimestamp = rec.getTimestamp(slaveTimestampIndex);
+                        slaveRowID = rec.getRowId();
                         if (slaveTimestamp <= masterTimestamp) {
                             key = joinKeyMap.withKey();
                             key.put(rec, slaveKeySink);
@@ -199,7 +207,7 @@ public class AsOfJoinLightRecordCursorFactory extends AbstractRecordCursorFactor
 
                     // now we have dangling slave record, which we need to hold on to
                     this.slaveTimestamp = slaveTimestamp;
-                    this.lastSlaveRowID = rec.getRowId();
+                    this.lastSlaveRowID = slaveRowID;
                 }
                 key = joinKeyMap.withKey();
                 key.put(masterRecord, masterKeySink);

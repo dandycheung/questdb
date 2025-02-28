@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,9 +30,13 @@
 #include <winbase.h>
 #include <direct.h>
 #include <stdint.h>
+#include <windows.h>
 #include "../share/files.h"
 #include "errno.h"
 #include "files.h"
+
+#include <stdio.h>
+#include <ntdef.h>
 
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_copy
         (JNIEnv *e, jclass cls, jlong lpszFrom, jlong lpszTo) {
@@ -171,7 +175,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_write
     }
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && WriteFile(handle, (LPCVOID) address, (DWORD) len, &count, NULL)) {
+        && WriteFile(handle, (LPCVOID) address, (DWORD) len, &count, NULL)) {
         return count;
     }
     SaveLastError();
@@ -189,7 +193,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_read
     DWORD count;
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && ReadFile(handle, (LPVOID) address, (DWORD) len, &count, NULL)) {
+        && ReadFile(handle, (LPVOID) address, (DWORD) len, &count, NULL)) {
         return count;
     }
     SaveLastError();
@@ -202,7 +206,7 @@ JNIEXPORT jbyte JNICALL Java_io_questdb_std_Files_readNonNegativeByte
     jbyte result;
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && ReadFile(handle, (LPVOID) &result, (DWORD) 1, &count, NULL)) {
+        && ReadFile(handle, (LPVOID) &result, (DWORD) 1, &count, NULL)) {
         if (count == 1) {
             return result;
         }
@@ -217,7 +221,7 @@ JNIEXPORT jshort JNICALL Java_io_questdb_std_Files_readNonNegativeShort
     jshort result;
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && ReadFile(handle, (LPVOID) &result, (DWORD) 2, &count, NULL)) {
+        && ReadFile(handle, (LPVOID) &result, (DWORD) 2, &count, NULL)) {
         if (count == 2) {
             return result;
         }
@@ -232,9 +236,24 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_readNonNegativeInt
     jint result;
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && ReadFile(handle, (LPVOID) &result, (DWORD) 4, &count, NULL)) {
+        && ReadFile(handle, (LPVOID) &result, (DWORD) 4, &count, NULL)) {
         if (count == 4) {
             return result;
+        }
+    }
+    SaveLastError();
+    return -1;
+}
+
+JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_readIntAsUnsignedLong
+        (JNIEnv *e, jclass cl, jint fd, jlong offset) {
+    DWORD count;
+    uint32_t result;
+    HANDLE handle = FD_TO_HANDLE(fd);
+    if (set_file_pos(handle, offset)
+        && ReadFile(handle, (LPVOID) &result, (DWORD) 4, &count, NULL)) {
+        if (count == 4) {
+            return (jlong) result;
         }
     }
     SaveLastError();
@@ -247,7 +266,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_readNonNegativeLong
     jlong result;
     HANDLE handle = FD_TO_HANDLE(fd);
     if (set_file_pos(handle, offset)
-            && ReadFile(handle, (LPVOID) &result, (DWORD) 8, &count, NULL)) {
+        && ReadFile(handle, (LPVOID) &result, (DWORD) 8, &count, NULL)) {
         if (count == 8) {
             return result;
         }
@@ -304,9 +323,10 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_msync(JNIEnv *e, jclass cl, jlo
 }
 
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_fsync(JNIEnv *e, jclass cl, jint fd) {
-    // Windows does not seem to have fsync or cannot fsync directory.
-    // To be fair we never saw our destructive test fail on windows,
-    // which leads to an assumption that all directory changes on windows are synchronous.
+    if (FlushFileBuffers(FD_TO_HANDLE(fd))) {
+        return 0;
+    }
+    SaveLastError();
     return -1;
 }
 
@@ -446,6 +466,10 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_softLink(JNIEnv *e, jclass cl, 
     return -1;
 }
 
+// JNIEXPORT jboolean JNICALL Java_io_questdb_std_Files_isDir(JNIEnv *e, jclass cl, jlong lpszName) {
+//     See Rust implementation in `files.rs`.
+// }
+
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_unlink(JNIEnv *e, jclass cl, jlong lpszSoftLink) {
     // https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-deletefile
     // If the path points to a symbolic link, the symbolic link is deleted, not the target.
@@ -498,7 +522,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_getFileSystemStatus(JNIEnv *e,
                 // windows share (CIFS) reports filesystem as NTFS
                 // local disks support transactions, but CIFS does not
                 strcpy((char *) lpszName, fileSystemName);
-                return -1 * 0x2b;
+                return FLAG_FS_SUPPORTED * 0x2b;
             }
             // unsupported file system
             strcpy((char *) lpszName, "SMB");
@@ -646,12 +670,12 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_mmap0
     }
 
     HANDLE hMapping = CreateFileMapping(
-        FD_TO_HANDLE(fd),
-        NULL,
-        flProtect | SEC_RESERVE,
-        (DWORD) (maxsize >> 32),
-        (DWORD) maxsize,
-        NULL
+            FD_TO_HANDLE(fd),
+            NULL,
+            flProtect | SEC_RESERVE,
+            (DWORD) (maxsize >> 32),
+            (DWORD) maxsize,
+            NULL
     );
     if (hMapping == NULL) {
         SaveLastError();
@@ -690,11 +714,6 @@ static inline jlong internal_mremap0
     // Note that unmapping will not flush dirty pages because the mapping to address is shared with newAddress
     Java_io_questdb_std_Files_munmap0((JNIEnv *) NULL, (jclass) NULL, address, previousLen);
     return newAddress;
-}
-
-JNIEXPORT jlong JNICALL JavaCritical_io_questdb_std_Files_mremap0
-        (jint fd, jlong address, jlong previousLen, jlong newLen, jlong offset, jint flags) {
-    return internal_mremap0(fd, address, previousLen, newLen, offset, flags);
 }
 
 JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_mremap0
@@ -740,8 +759,6 @@ JNIEXPORT jboolean JNICALL Java_io_questdb_std_Files_rmdir
     SaveLastError();
     return FALSE;
 }
-
-#define UTF8_MAX_PATH (MAX_PATH * 4)
 
 typedef struct {
     WIN32_FIND_DATAW *find_data;
@@ -801,8 +818,16 @@ JNIEXPORT void JNICALL Java_io_questdb_std_Files_findClose
 
 JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_findName
         (JNIEnv *e, jclass cl, jlong findPtr) {
-    WideCharToMultiByte(CP_UTF8, 0, ((FIND *) findPtr)->find_data->cFileName, -1, ((FIND *) findPtr)->utf8Name,
-                        UTF8_MAX_PATH, NULL, NULL);
+    WideCharToMultiByte(
+            CP_UTF8,
+            0,
+            ((FIND *) findPtr)->find_data->cFileName,
+            -1,
+            ((FIND *) findPtr)->utf8Name,
+            UTF8_MAX_PATH,
+            NULL,
+            NULL
+    );
     return (jlong) ((FIND *) findPtr)->utf8Name;
 }
 
@@ -847,8 +872,8 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_openCleanRW
                 DWORD writtenCount = 0;
                 byte buff[1] = {0};
                 if (set_file_pos(handle, 0)
-                        && WriteFile(handle, (LPCVOID) &buff, (DWORD) 1, &writtenCount, NULL)
-                        && writtenCount == 1) {
+                    && WriteFile(handle, (LPCVOID) &buff, (DWORD) 1, &writtenCount, NULL)
+                    && writtenCount == 1) {
 
                     // extend file to `size`
                     if (Java_io_questdb_std_Files_allocate(e, cl, fd, size) == JNI_TRUE) {
@@ -874,7 +899,7 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_openCleanRW
     } else if (fileSize == 0) {
         // file size is already 0, no cleanup but allocate the file
         if (Java_io_questdb_std_Files_truncate(e, cl, fd, size) == JNI_TRUE
-                && LockFileEx(handle, 0, 0, 0, 1, &sOverlapped)) {
+            && LockFileEx(handle, 0, 0, 0, 1, &sOverlapped)) {
             return fd;
         }
     }
@@ -924,4 +949,14 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_getDiskSize(JNIEnv *e, jclass 
     }
     SaveLastError();
     return -1;
+}
+
+JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_getFileLimit
+        (JNIEnv *e, jclass cl) {
+    return 0; // no-op
+}
+
+JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_getMapCountLimit
+        (JNIEnv *e, jclass cl) {
+    return 0; // no-op
 }

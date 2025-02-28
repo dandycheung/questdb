@@ -9,7 +9,7 @@ jobs:
           os: macOS
           jdk: "1.11"
           testset: "all"
-          includeTests: "griffin.**.*?"
+          includeTests: "**/griffin/**"
           javadoc_step: ""
           javadoc_profile: ""
         mac-cairo:
@@ -18,7 +18,26 @@ jobs:
           os: macOS
           jdk: "1.11"
           testset: "all"
-          includeTests: "cairo.**.*?"
+          includeTests: "**/cairo/**"
+          excludeTests: "**/cairo/fuzz/**"
+          javadoc_step: ""
+          javadoc_profile: ""
+        mac-cairo-fuzz:
+          imageName: "macos-latest"
+          poolName: "Azure Pipelines"
+          os: macOS
+          jdk: "1.11"
+          testset: "all"
+          includeTests: "**/cairo/fuzz/**"
+          javadoc_step: ""
+          javadoc_profile: ""
+        mac-pgwire:
+          imageName: "macos-latest"
+          poolName: "Azure Pipelines"
+          os: macOS
+          jdk: "1.11"
+          testset: "all"
+          includeTests: "**/pgwire/**/*.java"
           javadoc_step: ""
           javadoc_profile: ""
         mac-other:
@@ -27,7 +46,7 @@ jobs:
           os: macOS
           jdk: "1.11"
           testset: "all"
-          excludeTests: "**/griffin/**,**/cairo/**"
+          excludeTests: "**/griffin/**,**/cairo/**,**/compat/**,**/cliutil/**,**/pgwire/**"
           javadoc_step: ""
           javadoc_profile: ""
         windows-griffin:
@@ -36,7 +55,27 @@ jobs:
           os: Windows
           jdk: "1.11"
           testset: "all"
-          includeTests: "griffin.**.*?"
+          includeTests: "**/griffin/**"
+          excludeTests: "**/O3*Test**,**/**Fuzz**"
+          javadoc_step: ""
+          javadoc_profile: ""
+        windows-fuzz1:
+          imageName: "windows-latest"
+          poolName: "Azure Pipelines"
+          os: Windows
+          jdk: "1.11"
+          testset: "all"
+          includeTests: "**/cairo/fuzz/**"
+          javadoc_step: ""
+          javadoc_profile: ""
+        windows-fuzz2:
+          imageName: "windows-latest"
+          poolName: "Azure Pipelines"
+          os: Windows
+          jdk: "1.11"
+          testset: "all"
+          includeTests: "**/O3*Test**,**/**Fuzz**"
+          excludeTests: "**/cairo/fuzz/**"
           javadoc_step: ""
           javadoc_profile: ""
         windows-cairo:
@@ -45,7 +84,17 @@ jobs:
           os: Windows
           jdk: "1.11"
           testset: "all"
-          includeTests: "cairo.**.*?"
+          includeTests: "**/cairo/**"
+          excludeTests: "**/O3*Test**,**/**Fuzz**"
+          javadoc_step: ""
+          javadoc_profile: ""
+        windows-pgwire:
+          imageName: "windows-latest"
+          poolName: "Azure Pipelines"
+          os: Windows
+          jdk: "1.11"
+          testset: "all"
+          includeTests: "**/pgwire/**/*.java"
           javadoc_step: ""
           javadoc_profile: ""
         windows-other:
@@ -54,22 +103,14 @@ jobs:
           os: Windows
           jdk: "1.11"
           testset: "all"
-          excludeTests: "**/griffin/**,**/cairo/**"
+          excludeTests: "**/griffin/**,**/cairo/**,**/compat/**,**/cliutil/**,**/pgwire/**"
           javadoc_step: ""
           javadoc_profile: ""
-        linux-jdk8:
+        linux-jdk11:
           imageName: "ubuntu-latest"
           poolName: "Azure Pipelines"
           os: Linux
-          jdk: "1.8"
-          testset: "none"
-          javadoc_step: ""
-          javadoc_profile: ""
-        linux-jdk17:
-          imageName: "ubuntu-latest"
-          poolName: "Azure Pipelines"
-          os: Linux
-          jdk: "1.17"
+          jdk: "1.11"
           testset: "none"
           javadoc_step: "javadoc:javadoc"
           javadoc_profile: ",javadoc"
@@ -78,9 +119,11 @@ jobs:
       name: $(poolName)
     timeoutInMinutes: 60
     variables:
-      SOURCE_CODE_CHANGED: $[stageDependencies.CheckChanges.CheckChanges.outputs['check_changes.SOURCE_CODE_CHANGED']]
+      SOURCE_CODE_CHANGED: $[stageDependencies.CheckChanges.CheckChanges.outputs['check_coverage.SOURCE_CODE_CHANGED']]
+      RUST_SOURCE_CODE_CHANGED: $[stageDependencies.CheckChanges.CheckChanges.outputs['check_coverage.RUST_SOURCE_CODE_CHANGED']]
       COVERAGE_DIFF: $[stageDependencies.CheckChanges.CheckChanges.outputs['check_coverage.COVERAGE_DIFF']]
       CODE_COVERAGE_TOOL_OPTION: $[stageDependencies.CheckChanges.CheckChanges.outputs['check_coverage.CODE_COVERAGE_TOOL_OPTION']]
+      DIFF_COVER_THRESHOLD_PCT: 50
       ARCHIVED_CRASH_LOG: "$(Build.ArtifactStagingDirectory)/questdb-crash-$(Build.SourceBranchName)-$(Build.SourceVersion)-$(System.StageAttempt)-$(Agent.OS)-$(jdk).log"
     steps:
       - template: steps.yml

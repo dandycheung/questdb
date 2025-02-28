@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,16 +24,35 @@
 
 package io.questdb.cairo;
 
+import io.questdb.std.ObjHashSet;
 import io.questdb.std.ObjList;
+import org.jetbrains.annotations.Nullable;
 import org.jetbrains.annotations.TestOnly;
 
 import java.io.Closeable;
 
 public interface TableNameRegistry extends Closeable {
-    TableToken LOCKED_TOKEN = new TableToken("__locked__", "__locked__", Integer.MAX_VALUE, false);
+    /**
+     * Table token that is used to lock table name during table drop or rename operation. It is not a valid table token and the
+     * calling code should treat it as table does not exist on queries, table already exists on "create" operations
+     * and table does not exit on "drop" operations.
+     */
+    TableToken LOCKED_DROP_TOKEN = new TableToken("__locked_drop__", "__locked_drop__", Integer.MAX_VALUE - 1, false, false, false);
+    /**
+     * Table token that is used to lock table name during table creation. It is not a valid table token and the
+     * calling code should treat it as table does not exist on queries, table retry on "create" operations
+     * and table does not exit on "drop" operations.
+     */
+    TableToken LOCKED_TOKEN = new TableToken("__locked__", "__locked__", Integer.MAX_VALUE, false, false, false);
+
+    static boolean isLocked(TableToken tableToken) {
+        return tableToken == LOCKED_TOKEN || tableToken == LOCKED_DROP_TOKEN;
+    }
+
+    TableToken addTableAlias(String newName, TableToken tableToken);
 
     /**
-     * cleans the registry and releases all resources
+     * Cleans the registry and releases all resources
      */
     void close();
 
@@ -59,18 +78,24 @@ public interface TableNameRegistry extends Closeable {
      * Returns table token by directory name. If table does not exist, returns null.
      *
      * @param dirName directory name
-     * @param tableId table id
      * @return resolves private table name to TableToken. If no token exists, returns null
      */
-    TableToken getTableToken(String dirName, int tableId);
+    TableToken getTableTokenByDirName(String dirName);
 
     /**
-     * Sets all table tokens to the bucket provided. Among live table it can return dropped tables which are not fully deleted yet.
+     * Returns total count of table tokens. Among live tables it can count dropped tables which are not fully deleted yet.
      *
-     * @param bucket         bucket to set table tokens to
+     * @param includeDropped if true, count dropped tables
+     */
+    int getTableTokenCount(boolean includeDropped);
+
+    /**
+     * Sets all table tokens to the target provided. Among live tables it can return dropped tables which are not fully deleted yet.
+     *
+     * @param target         target to set table tokens to
      * @param includeDropped if true, include dropped tables
      */
-    void getTableTokens(ObjList<TableToken> bucket, boolean includeDropped);
+    void getTableTokens(ObjHashSet<TableToken> target, boolean includeDropped);
 
     /**
      * Returns Table Token by directory name.
@@ -89,6 +114,14 @@ public interface TableNameRegistry extends Closeable {
     boolean isTableDropped(TableToken tableToken);
 
     /**
+     * Checks that WAL table dir does not belong to a dropped table.
+     *
+     * @param tableDir table dir to check
+     * @return true if table id dropped, false otherwise
+     */
+    boolean isWalTableDropped(CharSequence tableDir);
+
+    /**
      * Locks table name for creation and returns table token.
      * {@link #registerName(TableToken)} must be called to complete table creation and release the lock.
      * or {@link #unlockTableName(TableToken)} must be called to release lock without completing table creation.
@@ -96,10 +129,11 @@ public interface TableNameRegistry extends Closeable {
      * @param tableName table name
      * @param dirName   private table name, e.g. the directory where the table files are stored
      * @param tableId   unique table id
+     * @param isMatView true if the table is a materialized view
      * @param isWal     true if table is WAL enabled
      * @return table token or null if table name with the same tableId, private name is already registered
      */
-    TableToken lockTableName(String tableName, String dirName, int tableId, boolean isWal);
+    TableToken lockTableName(String tableName, String dirName, int tableId, boolean isMatView, boolean isWal);
 
     /**
      * Purges token from registry after table, and it's WAL segments have been removed on disk. This method is
@@ -110,23 +144,34 @@ public interface TableNameRegistry extends Closeable {
     void purgeToken(TableToken token);
 
     /**
-     * Registers table name and releases lock. This method must be called after {@link #lockTableName(String, String, int, boolean)}.
+     * Tests consistency of the internal data structures. This is test-only method
+     */
+    void reconcile();
+
+    /**
+     * Registers table name and releases lock. This method must be called after {@link #lockTableName(String, String, int, boolean, boolean)}.
      *
-     * @param tableToken table token returned by {@link #lockTableName(String, String, int, boolean)}
+     * @param tableToken table token returned by {@link #lockTableName(String, String, int, boolean, boolean)}
      */
     void registerName(TableToken tableToken);
 
     /**
      * Reloads table name registry from storage.
      */
-    default void reloadTableNameCache() {
-        reloadTableNameCache(null);
+    default void reload() {
+        reload(null);
     }
 
     /**
      * Reloads table name registry from storage, adjusted with converted tables.
+     *
+     * @param convertedTables - list of table tokens for tables that have just been converted from WAL to non-WAL or
+     *                        other way around. This list can be null or empty if no tables have changes the layout.
+     * @return true if reload did not find any inconsistencies, useful for tests
      */
-    void reloadTableNameCache(ObjList<TableToken> convertedTables);
+    boolean reload(@Nullable ObjList<TableToken> convertedTables);
+
+    void removeAlias(TableToken tableToken);
 
     /**
      * Updates table name in registry.
@@ -138,6 +183,8 @@ public interface TableNameRegistry extends Closeable {
      */
     TableToken rename(CharSequence oldName, CharSequence newName, TableToken tableToken);
 
+    void rename(TableToken alias, TableToken replaceWith);
+
     /**
      * Resets table name storage memory to initial value. Used to not false detect memory leaks in tests.
      */
@@ -145,10 +192,10 @@ public interface TableNameRegistry extends Closeable {
     void resetMemory();
 
     /**
-     * Unlocks table name. This method must be called after {@link #lockTableName(String, String, int, boolean)}.
+     * Unlocks table name. This method must be called after {@link #lockTableName(String, String, int, boolean, boolean)}.
      * If table name is not locked, does nothing.
      *
-     * @param tableToken table token returned by {@link #lockTableName(String, String, int, boolean)}
+     * @param tableToken table token returned by {@link #lockTableName(String, String, int, boolean, boolean)}
      */
     void unlockTableName(TableToken tableToken);
 }

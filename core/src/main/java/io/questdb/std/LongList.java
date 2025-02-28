@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,8 +24,10 @@
 
 package io.questdb.std;
 
-import io.questdb.cairo.BinarySearch;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import io.questdb.std.str.Utf16Sink;
+import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.TestOnly;
 
 import java.util.Arrays;
@@ -33,6 +35,7 @@ import java.util.Arrays;
 public class LongList implements Mutable, LongVec, Sinkable {
     private static final int DEFAULT_ARRAY_SIZE = 16;
     private static final long DEFAULT_NO_ENTRY_VALUE = -1L;
+    private final int initialCapacity;
     private final long noEntryValue;
     private long[] data;
     private int pos = 0;
@@ -46,32 +49,35 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public LongList(int capacity, long noEntryValue) {
+        this.initialCapacity = capacity;
         this.data = new long[capacity];
         this.noEntryValue = noEntryValue;
     }
 
     public LongList(LongList other) {
-        this.data = new long[Math.max(other.size(), DEFAULT_ARRAY_SIZE)];
+        this.initialCapacity = Math.max(other.size(), DEFAULT_ARRAY_SIZE);
+        this.data = new long[initialCapacity];
         setPos(other.size());
         System.arraycopy(other.data, 0, this.data, 0, pos);
         this.noEntryValue = other.noEntryValue;
     }
 
     public LongList(long[] other) {
-        this.data = new long[other.length];
+        this.initialCapacity = other.length;
+        this.data = new long[initialCapacity];
         setPos(other.length);
         System.arraycopy(other, 0, this.data, 0, pos);
         this.noEntryValue = DEFAULT_NO_ENTRY_VALUE;
     }
 
     public void add(long value) {
-        ensureCapacity(pos + 1);
+        checkCapacity(pos + 1);
         data[pos++] = value;
     }
 
     public void add(long value0, long value1) {
         int n = pos;
-        ensureCapacity(n + 2);
+        checkCapacity(n + 2);
         data[n++] = value0;
         data[n++] = value1;
         pos = n;
@@ -79,7 +85,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
 
     public void add(long value0, long value1, long value2, long value3) {
         int n = pos;
-        ensureCapacity(n + 4);
+        checkCapacity(n + 4);
         data[n++] = value0;
         data[n++] = value1;
         data[n++] = value2;
@@ -89,7 +95,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
 
     public void add(long value0, long value1, long value2, long value3, long value4, long value5, long value6, long value7) {
         int n = pos;
-        ensureCapacity(n + 8);
+        checkCapacity(n + 8);
         data[n++] = value0;
         data[n++] = value1;
         data[n++] = value2;
@@ -108,15 +114,22 @@ public class LongList implements Mutable, LongVec, Sinkable {
     public void add(LongList that, int lo, int hi) {
         int p = pos;
         int s = hi - lo;
-        ensureCapacity(p + s);
+        checkCapacity(p + s);
         System.arraycopy(that.data, lo, this.data, p, s);
         pos += s;
     }
 
     public void add(int index, long element) {
-        ensureCapacity(++pos);
+        checkCapacity(++pos);
         System.arraycopy(data, index, data, index + 1, pos - index - 1);
         data[index] = element;
+    }
+
+    public void addAll(LongList that) {
+        int p = pos;
+        int s = that.size();
+        setPos(p + s);
+        System.arraycopy(that.data, 0, this.data, p, s);
     }
 
     public void arrayCopy(int srcPos, int dstPos, int length) {
@@ -124,7 +137,6 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public int binarySearch(long value, int scanDir) {
-
         // this is the same algorithm as implemented in C (util.h)
         // template<class T, class V>
         // inline int64_t binary_search(T *data, V value, int64_t low, int64_t high, int32_t scan_dir)
@@ -133,7 +145,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
         int low = 0;
         int high = pos - 1;
         while (high - low > 65) {
-            final int mid = (low + high) / 2;
+            final int mid = (low + high) >>> 1;
             final long midVal = data[mid];
 
             if (midVal < value) {
@@ -142,12 +154,12 @@ public class LongList implements Mutable, LongVec, Sinkable {
                 high = mid - 1;
             } else {
                 // In case of multiple equal values, find the first
-                return scanDir == BinarySearch.SCAN_UP ?
+                return scanDir == Vect.BIN_SEARCH_SCAN_UP ?
                         scrollUp(mid, midVal) :
                         scrollDown(mid, high, midVal);
             }
         }
-        return scanDir == BinarySearch.SCAN_UP ?
+        return scanDir == Vect.BIN_SEARCH_SCAN_UP ?
                 scanUp(value, low, high + 1) :
                 scanDown(value, low, high + 1);
     }
@@ -174,7 +186,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
         int low = offset >> shl;
         int high = (pos - 1) >> shl;
         while (high - low > 65) {
-            final int mid = (low + high) / 2;
+            final int mid = (low + high) >>> 1;
             final long midVal = data[mid << shl];
 
             if (midVal < value) {
@@ -183,21 +195,21 @@ public class LongList implements Mutable, LongVec, Sinkable {
                 high = mid - 1;
             } else {
                 // In case of multiple equal values, find the first
-                return scanDir == BinarySearch.SCAN_UP ?
+                return scanDir == Vect.BIN_SEARCH_SCAN_UP ?
                         scrollUpBlock(shl, mid, midVal) :
                         scrollDownBlock(shl, mid, high, midVal);
             }
         }
-        return scanDir == BinarySearch.SCAN_UP ?
+        return scanDir == Vect.BIN_SEARCH_SCAN_UP ?
                 scanUpBlock(shl, value, low, high + 1) :
                 scanDownBlock(shl, value, low, high + 1);
     }
 
-    public void clear() {
-        pos = 0;
+    public int capacity() {
+        return data.length;
     }
 
-    public void ensureCapacity(int capacity) {
+    public void checkCapacity(int capacity) {
         if (capacity < 0) {
             throw new IllegalArgumentException("Negative capacity. Integer overflow may be?");
         }
@@ -209,6 +221,10 @@ public class LongList implements Mutable, LongVec, Sinkable {
             System.arraycopy(data, 0, buf, 0, l);
             this.data = buf;
         }
+    }
+
+    public void clear() {
+        pos = 0;
     }
 
     /**
@@ -225,7 +241,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public void extendAndSet(int index, long value) {
-        ensureCapacity(index + 1);
+        checkCapacity(index + 1);
         if (index >= pos) {
             pos = index + 1;
         }
@@ -301,7 +317,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public void insert(int index, int length) {
-        ensureCapacity(pos + length);
+        checkCapacity(pos + length);
         if (pos > index) {
             System.arraycopy(data, index, data, index + length, pos - index);
         }
@@ -354,15 +370,29 @@ public class LongList implements Mutable, LongVec, Sinkable {
         Arrays.fill(data, pos, pos + slotSize, noEntryValue);
     }
 
+    public void restoreInitialCapacity() {
+        data = new long[initialCapacity];
+        pos = 0;
+    }
+
+    public void reverse() {
+        int n = size();
+        for (int i = 0, m = n / 2; i < m; i++) {
+            long tmp = data[i];
+            data[i] = data[n - i - 1];
+            data[n - i - 1] = tmp;
+        }
+    }
+
     public void seed(int capacity, long value) {
-        ensureCapacity(capacity);
+        checkCapacity(capacity);
         pos = capacity;
         fill(0, capacity, value);
     }
 
     public void seed(int fromIndex, int count, long value) {
         int capacity = fromIndex + count;
-        ensureCapacity(capacity);
+        checkCapacity(capacity);
         Arrays.fill(data, fromIndex, capacity, value);
     }
 
@@ -375,7 +405,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public void setAll(int capacity, long value) {
-        ensureCapacity(capacity);
+        checkCapacity(capacity);
         pos = capacity;
         Arrays.fill(data, value);
     }
@@ -387,7 +417,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     public final void setPos(int pos) {
-        ensureCapacity(pos);
+        checkCapacity(pos);
         this.pos = pos;
     }
 
@@ -438,15 +468,15 @@ public class LongList implements Mutable, LongVec, Sinkable {
     }
 
     @Override
-    public void toSink(CharSink sink) {
-        sink.put('[');
+    public void toSink(@NotNull CharSink<?> sink) {
+        sink.putAscii('[');
         for (int i = 0, k = pos; i < k; i++) {
             if (i > 0) {
-                sink.put(',');
+                sink.putAscii(',');
             }
             sink.put(get(i));
         }
-        sink.put(']');
+        sink.putAscii(']');
     }
 
     /**
@@ -454,7 +484,7 @@ public class LongList implements Mutable, LongVec, Sinkable {
      */
     @Override
     public String toString() {
-        final CharSink sb = Misc.getThreadLocalBuilder();
+        final Utf16Sink sb = Misc.getThreadLocalSink();
         toSink(sb);
         return sb.toString();
     }

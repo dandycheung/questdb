@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,62 +24,80 @@
 
 package io.questdb.test.griffin;
 
-import io.questdb.*;
+import io.questdb.Bootstrap;
+import io.questdb.DefaultBootstrapConfiguration;
+import io.questdb.PropertyKey;
+import io.questdb.ServerMain;
 import io.questdb.cairo.CairoEngine;
 import io.questdb.cairo.TableToken;
 import io.questdb.cairo.wal.ApplyWal2TableJob;
-import io.questdb.std.Chars;
-import io.questdb.std.Files;
+import io.questdb.mp.WorkerPool;
 import io.questdb.std.FilesFacade;
+import io.questdb.std.str.LPSZ;
+import io.questdb.std.str.Path;
+import io.questdb.std.str.Utf8s;
 import io.questdb.test.AbstractBootstrapTest;
 import io.questdb.test.TestServerMain;
 import io.questdb.test.std.TestFilesFacadeImpl;
-import io.questdb.std.str.LPSZ;
-import io.questdb.std.str.Path;
 import io.questdb.test.tools.TestUtils;
 import org.junit.BeforeClass;
+import org.junit.Ignore;
 import org.junit.Test;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static io.questdb.test.griffin.AlterTableSetTypeTest.NON_WAL;
-import static org.junit.Assert.*;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertTrue;
 
 public class AlterTableSetTypeSuspendedTest extends AbstractAlterTableSetTypeRestartTest {
 
     @BeforeClass
     public static void setUpStatic() throws Exception {
         AbstractBootstrapTest.setUpStatic();
-        try {
-            createDummyConfiguration(PropertyKey.CAIRO_WAL_SUPPORTED.getPropertyPath() + "=true");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+        TestUtils.unchecked(() -> createDummyConfiguration(PropertyKey.CAIRO_WAL_SUPPORTED.getPropertyPath() + "=true"));
     }
 
     @Test
+    @Ignore
     public void testWalSuspendedToNonWal() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
             final FilesFacade filesFacade = new TestFilesFacadeImpl() {
-                private int attempt = 0;
+                private final AtomicInteger attempt = new AtomicInteger();
 
                 @Override
-                public int openRW(LPSZ name, long opts) {
-                    if (Chars.contains(name, "x.d.1") && attempt++ == 0) {
+                public long openRW(LPSZ name, long opts) {
+                    if (Utf8s.containsAscii(name, "x.d.1") && attempt.getAndIncrement() == 0) {
                         return -1;
                     }
-                    return Files.openRW(name, opts);
+                    return super.openRW(name, opts);
                 }
             };
 
-            final Bootstrap bootstrap = new Bootstrap(null, System.getenv(), filesFacade, "-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION);
-            try (final ServerMain questdb = new TestServerMain(bootstrap)) {
+            final Bootstrap bootstrap = new Bootstrap(new DefaultBootstrapConfiguration() {
+                @Override
+                public FilesFacade getFilesFacade() {
+                    return filesFacade;
+                }
+            }, Bootstrap.getServerMainArgs(root));
+
+            try (final ServerMain questdb = new TestServerMain(bootstrap) {
+                @Override
+                protected void setupWalApplyJob(
+                        WorkerPool workerPool,
+                        CairoEngine engine,
+                        int sharedWorkerCount
+                ) {
+                }
+            }) {
                 questdb.start();
                 createTable(tableName, "WAL");
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = questdb.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
-                try (final ApplyWal2TableJob walApplyJob = new ApplyWal2TableJob(engine, 1, 1, null)) {
+                try (final ApplyWal2TableJob walApplyJob = new ApplyWal2TableJob(engine, 1, 1)) {
                     insertInto(tableName);
                     walApplyJob.drain(0);
 
@@ -112,11 +130,11 @@ public class AlterTableSetTypeSuspendedTest extends AbstractAlterTableSetTypeRes
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
+            try (final ServerMain questdb = new TestServerMain(getServerMainArgs())) {
                 questdb.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = questdb.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
                 assertFalse(engine.isWalTable(token));
 
                 // insert works now

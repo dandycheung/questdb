@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -64,7 +64,7 @@ public class LatestByRecordCursorFactory extends AbstractRecordCursorFactory {
         ArrayColumnTypes mapValueTypes = new ArrayColumnTypes();
         mapValueTypes.add(RECORD_INDEX_VALUE_IDX, ColumnType.LONG);
         mapValueTypes.add(TIMESTAMP_VALUE_IDX, ColumnType.TIMESTAMP);
-        Map latestByMap = MapFactory.createMap(configuration, columnTypes, mapValueTypes);
+        Map latestByMap = MapFactory.createOrderedMap(configuration, columnTypes, mapValueTypes);
         this.cursor = new LatestByRecordCursor(latestByMap, timestampIndex);
         this.rowIndexesInitialCapacity = configuration.getSqlLatestByRowCount();
         this.rowIndexes = new DirectLongList(rowIndexesInitialCapacity, MemoryTag.NATIVE_LATEST_BY_LONG_LIST);
@@ -77,8 +77,14 @@ public class LatestByRecordCursorFactory extends AbstractRecordCursorFactory {
 
     @Override
     public RecordCursor getCursor(SqlExecutionContext executionContext) throws SqlException {
-        cursor.of(base.getCursor(executionContext), recordSink, rowIndexes, rowIndexesInitialCapacity, executionContext.getCircuitBreaker());
-        return cursor;
+        final RecordCursor baseCursor = base.getCursor(executionContext);
+        try {
+            cursor.of(baseCursor, recordSink, rowIndexes, rowIndexesInitialCapacity, executionContext.getCircuitBreaker());
+            return cursor;
+        } catch (Throwable th) {
+            cursor.close();
+            throw th;
+        }
     }
 
     @Override
@@ -98,10 +104,15 @@ public class LatestByRecordCursorFactory extends AbstractRecordCursorFactory {
     }
 
     @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
+    }
+
+    @Override
     protected void _close() {
-        rowIndexes.close();
-        cursor.close();
-        base.close();
+        Misc.free(rowIndexes);
+        Misc.free(cursor);
+        Misc.free(base);
     }
 
     private static class LatestByRecordCursor implements NoRandomAccessRecordCursor {
@@ -130,7 +141,7 @@ public class LatestByRecordCursorFactory extends AbstractRecordCursorFactory {
         public void close() {
             if (isOpen) {
                 isOpen = false;
-                Misc.free(baseCursor);
+                baseCursor = Misc.free(baseCursor);
                 if (rowIndexes != null) {
                     rowIndexes.clear();
                     if (rowIndexes.getCapacity() > rowIndexesCapacityThreshold) {
@@ -187,25 +198,24 @@ public class LatestByRecordCursorFactory extends AbstractRecordCursorFactory {
                 long rowIndexesCapacityThreshold,
                 SqlExecutionCircuitBreaker circuitBreaker
         ) {
+            this.baseCursor = baseCursor;
+            baseRecord = baseCursor.getRecord();
             if (!isOpen) {
                 isOpen = true;
                 latestByMap.reopen();
             }
-
-            this.baseCursor = baseCursor;
-            baseRecord = baseCursor.getRecord();
             this.recordSink = recordSink;
             this.rowIndexes = rowIndexes;
             this.circuitBreaker = circuitBreaker;
-            index = 0;
-            rowIndexesPos = 0;
             this.rowIndexesCapacityThreshold = rowIndexesCapacityThreshold;
+            rowIndexesPos = 0;
+            index = 0;
             isMapBuilt = false;
         }
 
         @Override
         public long size() {
-            return rowIndexes.size();
+            return isMapBuilt ? rowIndexes.size() : -1;
         }
 
         @Override

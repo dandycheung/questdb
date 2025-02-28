@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,10 +32,15 @@ import io.questdb.cairo.sql.OperationFuture;
 import io.questdb.cairo.sql.Record;
 import io.questdb.cairo.sql.RecordCursor;
 import io.questdb.cairo.sql.RecordCursorFactory;
-import io.questdb.griffin.*;
+import io.questdb.griffin.CompiledQuery;
+import io.questdb.griffin.SqlCompiler;
+import io.questdb.griffin.SqlException;
+import io.questdb.griffin.SqlExecutionContext;
+import io.questdb.griffin.SqlExecutionContextImpl;
 import io.questdb.log.Log;
 import io.questdb.log.LogFactory;
 import io.questdb.mp.SCSequence;
+import io.questdb.std.Chars;
 import io.questdb.std.Long256;
 import io.questdb.std.Misc;
 import io.questdb.std.NanosecondClock;
@@ -45,16 +50,16 @@ import java.io.Closeable;
 
 public class TelemetryConfigLogger implements Closeable {
     public static final String OS_NAME = "os.name";
-    public static final CharSequence TELEMETRY_CONFIG_TABLE_NAME = "telemetry_config";
-    static final String QDB_PACKAGE = "QDB_PACKAGE";
+    public static final String TELEMETRY_CONFIG_TABLE_NAME = "telemetry_config";
     private static final Log LOG = LogFactory.getLog(TelemetryConfigLogger.class);
+    private static final String QDB_PACKAGE = "QDB_PACKAGE";
     private final CharSequence questDBVersion;
     private final TelemetryConfiguration telemetryConfiguration;
     private final SCSequence tempSequence = new SCSequence();
     private TableWriter configWriter;
 
     public TelemetryConfigLogger(CairoEngine engine) {
-        questDBVersion = engine.getConfiguration().getBuildInformation().getQuestDbVersion();
+        questDBVersion = engine.getConfiguration().getBuildInformation().getSwVersion();
         telemetryConfiguration = engine.getConfiguration().getTelemetryConfiguration();
     }
 
@@ -63,18 +68,18 @@ public class TelemetryConfigLogger implements Closeable {
         configWriter = Misc.free(configWriter);
     }
 
-    private void appendConfigRow(SqlCompiler compiler, TableWriter configWriter, Long256 id, boolean enabled) {
+    private void appendConfigRow(CairoEngine engine, TableWriter configWriter, Long256 id, boolean enabled) {
         final TableWriter.Row row = configWriter.newRow();
         if (id == null) {
-            final MicrosecondClock clock = compiler.getEngine().getConfiguration().getMicrosecondClock();
-            final NanosecondClock nanosecondClock = compiler.getEngine().getConfiguration().getNanosecondClock();
+            final MicrosecondClock clock = engine.getConfiguration().getMicrosecondClock();
+            final NanosecondClock nanosecondClock = engine.getConfiguration().getNanosecondClock();
             final long a = nanosecondClock.getTicks();
             final long b = clock.getTicks();
             row.putLong256(0, a, b, 0, 0);
             LOG.info()
                     .$("new instance [id=").$256(a, b, 0, 0)
                     .$(", enabled=").$(enabled)
-                    .$(']').$();
+                    .I$();
         } else {
             row.putLong256(0, id);
         }
@@ -91,64 +96,67 @@ public class TelemetryConfigLogger implements Closeable {
 
     private void tryAddColumn(SqlCompiler compiler, SqlExecutionContext executionContext, CharSequence columnDetails) {
         try {
-            final CompiledQuery cc = compiler.compile(
-                    "ALTER TABLE " + TELEMETRY_CONFIG_TABLE_NAME + " ADD COLUMN " + columnDetails,
-                    executionContext
-            );
+            CompiledQuery cc = compiler.query().$("ALTER TABLE ").$(TELEMETRY_CONFIG_TABLE_NAME).$(" ADD COLUMN ").$(columnDetails).compile(executionContext);
             try (OperationFuture fut = cc.execute(tempSequence)) {
                 fut.await();
             }
-        } catch (SqlException ex) {
-            LOG.info().$("Failed to alter telemetry table [table=").$(TELEMETRY_CONFIG_TABLE_NAME).$(", error=").$(ex.getFlyweightMessage()).I$();
+        } catch (SqlException ignore) {
         }
     }
 
     private TableWriter updateTelemetryConfig(
+            CairoEngine engine,
             SqlCompiler compiler,
             SqlExecutionContextImpl sqlExecutionContext,
             TableToken tableToken
     ) throws SqlException {
-        final TableWriter configWriter = compiler.getEngine().getWriter(
-                sqlExecutionContext.getCairoSecurityContext(),
-                tableToken,
-                "telemetryConfig"
-        );
-        final CompiledQuery cc = compiler.compile(TELEMETRY_CONFIG_TABLE_NAME + " LIMIT -1", sqlExecutionContext);
-        try (
-                final RecordCursorFactory factory = cc.getRecordCursorFactory();
-                final RecordCursor cursor = factory.getCursor(sqlExecutionContext)
-        ) {
-            final boolean enabled = telemetryConfiguration.getEnabled();
-            if (cursor.hasNext()) {
-                final Record record = cursor.getRecord();
-                final boolean _enabled = record.getBool(1);
-                final Long256 l256 = record.getLong256A(0);
-                final CharSequence _questDBVersion = record.getSym(2);
+        final TableWriter configWriter = engine.getWriter(tableToken, "telemetryConfig");
+        try {
+            final CompiledQuery cc = compiler.query().$(TELEMETRY_CONFIG_TABLE_NAME).$(" LIMIT -1").compile(sqlExecutionContext);
+            try (
+                    final RecordCursorFactory factory = cc.getRecordCursorFactory();
+                    final RecordCursor cursor = factory.getCursor(sqlExecutionContext)
+            ) {
+                final boolean enabled = telemetryConfiguration.getEnabled();
+                if (cursor.hasNext()) {
+                    final Record record = cursor.getRecord();
+                    final boolean _enabled = record.getBool(1);
+                    final Long256 l256 = record.getLong256A(0);
+                    final CharSequence _questDBVersion = record.getSymA(2);
 
-                // if the configuration changed to enable or disable telemetry
-                // we need to update the table to reflect that
-                if (enabled != _enabled || !questDBVersion.equals(_questDBVersion)) {
-                    appendConfigRow(compiler, configWriter, l256, enabled);
-                    LOG.advisory()
-                            .$("instance config changes [id=").$256(l256.getLong0(), l256.getLong1(), 0, 0)
-                            .$(", enabled=").$(enabled)
-                            .$(']').$();
+                    // if the configuration changed to enable or disable telemetry
+                    // we need to update the table to reflect that
+                    if (enabled != _enabled || !Chars.equalsNc(questDBVersion, _questDBVersion)) {
+                        appendConfigRow(engine, configWriter, l256, enabled);
+                        LOG.advisory()
+                                .$("instance config changes [id=").$256(l256.getLong0(), l256.getLong1(), 0, 0)
+                                .$(", enabled=").$(enabled)
+                                .I$();
+                    } else {
+                        LOG.advisory()
+                                .$("instance [id=").$256(l256.getLong0(), l256.getLong1(), 0, 0)
+                                .$(", enabled=").$(enabled)
+                                .I$();
+                    }
                 } else {
-                    LOG.advisory()
-                            .$("instance [id=").$256(l256.getLong0(), l256.getLong1(), 0, 0)
-                            .$(", enabled=").$(enabled)
-                            .$(']').$();
+                    // if there are no record for telemetry id we need to create one using clocks
+                    appendConfigRow(engine, configWriter, null, enabled);
                 }
-            } else {
-                // if there are no record for telemetry id we need to create one using clocks
-                appendConfigRow(compiler, configWriter, null, enabled);
             }
+        } catch (Throwable th) {
+            Misc.free(configWriter);
+            throw th;
         }
         return configWriter;
     }
 
     void init(CairoEngine engine, SqlCompiler compiler, SqlExecutionContextImpl sqlExecutionContext) throws SqlException {
-        compiler.compile("CREATE TABLE IF NOT EXISTS " + TELEMETRY_CONFIG_TABLE_NAME + " (id long256, enabled boolean, version symbol, os symbol, package symbol)", sqlExecutionContext);
+        final TableToken configTableToken = compiler.query()
+                .$("CREATE TABLE IF NOT EXISTS ")
+                .$(TELEMETRY_CONFIG_TABLE_NAME)
+                .$(" (id long256, enabled boolean, version symbol, os symbol, package symbol)")
+                .createTable(sqlExecutionContext);
+
         tryAddColumn(compiler, sqlExecutionContext, "version symbol");
         tryAddColumn(compiler, sqlExecutionContext, "os symbol");
         tryAddColumn(compiler, sqlExecutionContext, "package symbol");
@@ -156,14 +164,13 @@ public class TelemetryConfigLogger implements Closeable {
         // TODO: close configWriter, we currently keep it open to prevent users from modifying the table.
         // Once we have a permission system, we can use that instead.
         try {
-            final TableToken configTableToken = engine.getTableToken(TELEMETRY_CONFIG_TABLE_NAME);
-            configWriter = updateTelemetryConfig(compiler, sqlExecutionContext, configTableToken);
+            configWriter = updateTelemetryConfig(engine, compiler, sqlExecutionContext, configTableToken);
         } catch (CairoException ex) {
             LOG.error()
                     .$("could not open [table=`").utf8(TELEMETRY_CONFIG_TABLE_NAME)
                     .$("`, ex=").$(ex.getFlyweightMessage())
                     .$(", errno=").$(ex.getErrno())
-                    .$(']').$();
+                    .I$();
         }
     }
 }

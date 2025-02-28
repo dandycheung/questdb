@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,9 +26,9 @@ package io.questdb.test.cairo;
 
 import io.questdb.cairo.*;
 import io.questdb.cairo.sql.Record;
-import io.questdb.test.AbstractGriffinTest;
 import io.questdb.std.*;
 import io.questdb.std.str.StringSink;
+import io.questdb.test.AbstractCairoTest;
 import org.junit.Assert;
 import org.junit.Test;
 
@@ -37,7 +37,7 @@ import java.util.concurrent.CyclicBarrier;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 
-public class TableReaderTailRecordCursorTest extends AbstractGriffinTest {
+public class TableReaderTailRecordCursorTest extends AbstractCairoTest {
 
     @Test
     public void testBusyPollByDay() throws Exception {
@@ -151,11 +151,11 @@ public class TableReaderTailRecordCursorTest extends AbstractGriffinTest {
 
     private void testBusyPoll(long timestampIncrement, int n, String createStatement) throws Exception {
         assertMemoryLeak(() -> {
-            compiler.compile(createStatement, sqlExecutionContext);
+            execute(createStatement);
             final AtomicInteger errorCount = new AtomicInteger();
             final CyclicBarrier barrier = new CyclicBarrier(2);
             final CountDownLatch latch = new CountDownLatch(2);
-            TableToken tableToken = engine.getTableToken("xyz");
+            TableToken tableToken = engine.verifyTableName("xyz");
             new Thread(() -> {
                 try (TableWriter writer = getWriter(tableToken)) {
                     barrier.await();
@@ -191,11 +191,12 @@ public class TableReaderTailRecordCursorTest extends AbstractGriffinTest {
             }).start();
 
             new Thread(() -> {
-                try (TableReader reader = engine.getReader(sqlExecutionContext.getCairoSecurityContext(), tableToken)) {
+                try (
+                        TableReader reader = engine.getReader(tableToken);
+                        TestTableReaderTailRecordCursor cursor = new TestTableReaderTailRecordCursor().of(reader)
+                ) {
                     Rnd rnd = new Rnd();
                     int count = 0;
-                    final TableReaderTailRecordCursor cursor = new TableReaderTailRecordCursor();
-                    cursor.of(reader);
                     final Record record = cursor.getRecord();
                     barrier.await();
                     while (count < n) {
@@ -239,28 +240,20 @@ public class TableReaderTailRecordCursorTest extends AbstractGriffinTest {
         final int blobSize = 1024;
         final int n = 1000;
         assertMemoryLeak(() -> {
-            compiler.compile(
-                    "create table xyz (sequence INT, event BINARY, ts LONG, stamp TIMESTAMP) timestamp(stamp) partition by " + PartitionBy.toString(partitionBy),
-                    sqlExecutionContext
-            );
+            execute("create table xyz (sequence INT, event BINARY, ts LONG, stamp TIMESTAMP) timestamp(stamp) partition by " + PartitionBy.toString(partitionBy));
 
-            TableToken tableToken = engine.getTableToken("xyz");
+            TableToken tableToken = engine.verifyTableName("xyz");
             try (TableWriter writer = getWriter(tableToken)) {
                 long ts = 0;
                 long addr = Unsafe.malloc(blobSize, MemoryTag.NATIVE_DEFAULT);
                 try {
-
                     Rnd rnd = new Rnd();
                     appendRecords(0, n, timestampIncrement, writer, ts, addr, rnd);
                     ts = n * timestampIncrement;
-                    try (TableReaderTailRecordCursor cursor = new TableReaderTailRecordCursor()) {
-                        cursor.of(
-                                engine.getReader(
-                                        securityContext,
-                                        tableToken,
-                                        TableUtils.ANY_TABLE_VERSION
-                                )
-                        );
+                    try (
+                            TableReader reader = engine.getReader(tableToken, TableUtils.ANY_TABLE_VERSION);
+                            TestTableReaderTailRecordCursor cursor = new TestTableReaderTailRecordCursor().of(reader)
+                    ) {
                         cursor.toBottom();
 
                         Assert.assertFalse(cursor.reload());
@@ -302,28 +295,23 @@ public class TableReaderTailRecordCursorTest extends AbstractGriffinTest {
         final int blobSize = 1024;
         final int n = 1000;
         assertMemoryLeak(() -> {
-            compile(
+            execute(
                     "create table xyz (sequence INT, event BINARY, ts LONG, stamp TIMESTAMP) timestamp(stamp) partition by " + PartitionBy.toString(partitionBy),
                     sqlExecutionContext
             );
 
-            TableToken tableToken = engine.getTableToken("xyz");
+            TableToken tableToken = engine.verifyTableName("xyz");
             try (TableWriter writer = getWriter(tableToken)) {
                 long ts = 0;
                 long addr = Unsafe.malloc(blobSize, MemoryTag.NATIVE_DEFAULT);
                 try {
-
                     Rnd rnd = new Rnd();
                     appendRecords(0, n, timestampIncrement, writer, ts, addr, rnd);
                     ts = n * timestampIncrement;
-                    try (TableReaderTailRecordCursor cursor = new TableReaderTailRecordCursor()) {
-                        cursor.of(
-                                engine.getReader(
-                                        securityContext,
-                                        tableToken,
-                                        TableUtils.ANY_TABLE_VERSION
-                                )
-                        );
+                    try (
+                            TableReader reader = engine.getReader(tableToken, TableUtils.ANY_TABLE_VERSION);
+                            TestTableReaderTailRecordCursor cursor = new TestTableReaderTailRecordCursor().of(reader)
+                    ) {
                         Assert.assertTrue(cursor.reload());
                         int count = 0;
                         Record record = cursor.getRecord();

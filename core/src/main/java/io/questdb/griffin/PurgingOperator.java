@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,62 +25,93 @@
 package io.questdb.griffin;
 
 import io.questdb.MessageBus;
-import io.questdb.cairo.*;
-import io.questdb.cairo.sql.TableRecordMetadata;
+import io.questdb.cairo.BitmapIndexUtils;
+import io.questdb.cairo.CairoConfiguration;
+import io.questdb.cairo.ColumnType;
+import io.questdb.cairo.TableToken;
+import io.questdb.cairo.TableUtils;
 import io.questdb.log.Log;
 import io.questdb.mp.Sequence;
 import io.questdb.std.FilesFacade;
 import io.questdb.std.IntList;
 import io.questdb.std.LongList;
+import io.questdb.std.ObjList;
 import io.questdb.std.Os;
+import io.questdb.std.Transient;
 import io.questdb.std.str.Path;
 import io.questdb.tasks.ColumnPurgeTask;
 
-public abstract class PurgingOperator {
-    protected final LongList cleanupColumnVersions = new LongList();
-    protected final CairoConfiguration configuration;
-    protected final FilesFacade ff;
-    protected final MessageBus messageBus;
-    protected final Path path;
-    protected final int rootLen;
-    protected final TableWriter tableWriter;
-    protected final IntList updateColumnIndexes = new IntList();
-    private final LongList cleanupColumnVersionsAsync = new LongList();
+public final class PurgingOperator {
+    public static final long TABLE_ROOT_PARTITION = Long.MIN_VALUE + 1;
+    private final LongList cleanupColumnVersions = new LongList();
+    private final ObjList<String> columnNames = new ObjList<>();
+    private final FilesFacade ff;
     private final Log log;
+    private final MessageBus messageBus;
+    private final IntList updateColumnIndexes = new IntList();
 
-    protected PurgingOperator(
+    public PurgingOperator(
             Log log,
             CairoConfiguration configuration,
-            MessageBus messageBus,
-            TableWriter tableWriter,
-            Path path,
-            int rootLen
+            MessageBus messageBus
     ) {
         this.log = log;
-        this.configuration = configuration;
         this.messageBus = messageBus;
         this.ff = configuration.getFilesFacade();
-        this.tableWriter = tableWriter;
-        this.path = path;
-        this.rootLen = rootLen;
     }
 
-    public void purgeOldColumnVersions() {
-        boolean anyReadersBeforeCommittedTxn = tableWriter.checkScoreboardHasReadersBeforeLastCommittedTxn();
-        TableRecordMetadata tableMetadata = tableWriter.getMetadata();
+    public void add(
+            int columnIndex,
+            String columnName,
+            int columnType,
+            boolean isIndexed,
+            long columnVersion,
+            long partitionTimestamp,
+            long partitionNameTxn
+    ) {
+        updateColumnIndexes.add(columnIndex);
+        updateColumnIndexes.add(columnType);
+        updateColumnIndexes.add(isIndexed ? 1 : 0);
+        updateColumnIndexes.add(columnNames.size());
+        columnNames.add(columnName);
+        cleanupColumnVersions.add(columnIndex, columnVersion, partitionTimestamp, partitionNameTxn);
+    }
 
-        path.trimTo(rootLen);
-        long updateTxn = tableWriter.getTxn();
+    public void clear() {
+        updateColumnIndexes.clear();
+        cleanupColumnVersions.clear();
+    }
+
+    public void purge(
+            Path path,
+            TableToken tableToken,
+            int partitionBy,
+            boolean asyncOnly,
+            long truncateVersion,
+            long txn
+    ) {
+        int rootLen = path.size();
 
         try {
             // Process updated column by column, one at the time
-            for (int updatedCol = 0, nn = updateColumnIndexes.size(); updatedCol < nn; updatedCol++) {
+            int cleanupVersionSize = cleanupColumnVersions.size();
+            int lastColumnIndex = -1;
+            final int intsPerEntry = 4;
+            updateColumnIndexes.sortGroups(intsPerEntry);
+            for (int updatedCol = 0, nn = updateColumnIndexes.size(); updatedCol < nn; updatedCol += intsPerEntry) {
                 int processColumnIndex = updateColumnIndexes.getQuick(updatedCol);
-                CharSequence columnName = tableMetadata.getColumnName(processColumnIndex);
-                int columnType = tableMetadata.getColumnType(processColumnIndex);
-                cleanupColumnVersionsAsync.clear();
+                if (processColumnIndex == lastColumnIndex) {
+                    // Skip duplicate column index
+                    continue;
+                }
 
-                for (int i = 0, n = cleanupColumnVersions.size(); i < n; i += 4) {
+                lastColumnIndex = processColumnIndex;
+                int columnType = updateColumnIndexes.getQuick(updatedCol + 1);
+                boolean isIndexed = updateColumnIndexes.getQuick(updatedCol + 2) == 1;
+                int colNameIndex = updateColumnIndexes.getQuick(updatedCol + 3);
+                String columnName = columnNames.getQuick(colNameIndex);
+
+                for (int i = 0; i < cleanupVersionSize; i += 4) {
                     int columnIndex = (int) cleanupColumnVersions.getQuick(i);
                     long columnVersion = cleanupColumnVersions.getQuick(i + 1);
                     long partitionTimestamp = cleanupColumnVersions.getQuick(i + 2);
@@ -88,65 +119,70 @@ public abstract class PurgingOperator {
 
                     // Process updated column by column, one at a time
                     if (columnIndex == processColumnIndex) {
-                        boolean columnPurged = !anyReadersBeforeCommittedTxn;
-                        if (!anyReadersBeforeCommittedTxn) {
-                            path.trimTo(rootLen);
-                            TableUtils.setPathForPartition(path, tableWriter.getPartitionBy(), partitionTimestamp, false);
-                            TableUtils.txnPartitionConditionally(path, partitionNameTxn);
-                            int pathPartitionLen = path.length();
-                            TableUtils.dFile(path, columnName, columnVersion);
-                            if (!ff.remove(path.$())) {
-                                columnPurged = false;
-                            }
-                            if (columnPurged && ColumnType.isVariableLength(columnType)) {
-                                path.trimTo(pathPartitionLen);
-                                TableUtils.iFile(path, columnName, columnVersion);
-                                TableUtils.iFile(path.$(), columnName, columnVersion);
-                                if (!ff.remove(path.$()) && ff.exists(path)) {
-                                    columnPurged = false;
-                                }
-                            }
-                            if (columnPurged && tableMetadata.isColumnIndexed(columnIndex)) {
-                                path.trimTo(pathPartitionLen);
-                                BitmapIndexUtils.valueFileName(path, columnName, columnVersion);
-                                if (!ff.remove(path.$()) && ff.exists(path)) {
-                                    columnPurged = false;
+                        boolean columnPurged = !asyncOnly;
+                        if (!asyncOnly) {
+                            if (partitionTimestamp != TABLE_ROOT_PARTITION) {
+                                path.trimTo(rootLen);
+                                TableUtils.setPathForNativePartition(path, partitionBy, partitionTimestamp, partitionNameTxn);
+                                int pathPartitionLen = path.size();
+                                TableUtils.dFile(path, columnName, columnVersion);
+                                columnPurged = ff.removeQuiet(path.$());
+
+                                if (ColumnType.isVarSize(columnType)) {
+                                    TableUtils.iFile(path.trimTo(pathPartitionLen), columnName, columnVersion);
+                                    columnPurged &= ff.removeQuiet(path.$());
                                 }
 
-                                path.trimTo(pathPartitionLen);
-                                BitmapIndexUtils.keyFileName(path, columnName, columnVersion);
-                                if (!ff.remove(path.$()) && ff.exists(path)) {
-                                    columnPurged = false;
+                                if (isIndexed) {
+                                    BitmapIndexUtils.valueFileName(path.trimTo(pathPartitionLen), columnName, columnVersion);
+                                    columnPurged &= ff.removeQuiet(path.$());
+                                    BitmapIndexUtils.keyFileName(path.trimTo(pathPartitionLen), columnName, columnVersion);
+                                    columnPurged &= ff.removeQuiet(path.$());
                                 }
+                            } else {
+                                // This is removal of symbol files from the table root directory
+                                TableUtils.charFileName(path.trimTo(rootLen), columnName, columnVersion);
+                                columnPurged = ff.removeQuiet(path.$());
+                                TableUtils.offsetFileName(path.trimTo(rootLen), columnName, columnVersion);
+                                columnPurged &= ff.removeQuiet(path.$());
+                                BitmapIndexUtils.keyFileName(path.trimTo(rootLen), columnName, columnVersion);
+                                columnPurged &= ff.removeQuiet(path.$());
+                                BitmapIndexUtils.valueFileName(path.trimTo(rootLen), columnName, columnVersion);
+                                columnPurged &= ff.removeQuiet(path.$());
                             }
                         }
 
                         if (!columnPurged) {
-                            cleanupColumnVersionsAsync.add(columnVersion, partitionTimestamp, partitionNameTxn, 0L);
+                            // Schedule for async purge
+                            cleanupColumnVersions.add(columnVersion, partitionTimestamp, partitionNameTxn, 0);
                         }
                     }
                 }
 
                 // if anything not purged, schedule async purge
-                if (cleanupColumnVersionsAsync.size() > 0) {
+                if (cleanupColumnVersions.size() > cleanupVersionSize) {
                     purgeColumnVersionAsync(
-                            tableWriter.getTableToken(),
+                            tableToken,
                             columnName,
-                            tableMetadata.getTableId(),
-                            (int) tableWriter.getTruncateVersion(),
+                            tableToken.getTableId(),
+                            (int) truncateVersion,
                             columnType,
-                            tableWriter.getPartitionBy(),
-                            updateTxn,
-                            cleanupColumnVersionsAsync
+                            partitionBy,
+                            txn,
+                            cleanupColumnVersions,
+                            cleanupVersionSize,
+                            cleanupColumnVersions.size()
                     );
-                    log.info().$("column purge scheduled [table=").utf8(tableWriter.getTableToken().getTableName())
+                    cleanupColumnVersions.setPos(cleanupVersionSize);
+
+                    log.info().$("column purge scheduled [table=").utf8(tableToken.getTableName())
                             .$(", column=").utf8(columnName)
-                            .$(", updateTxn=").$(updateTxn)
+                            .$(", updateTxn=").$(txn)
                             .I$();
                 } else {
-                    log.info().$("columns purged locally [table=").utf8(tableWriter.getTableToken().getTableName())
+                    log.info().$("column purge complete [table=").utf8(tableToken.getTableName())
                             .$(", column=").utf8(columnName)
-                            .$(", newColumnVersion=").$(updateTxn - 1)
+                            .$(", newColumnVersion=").$(txn - 1)
                             .I$();
                 }
             }
@@ -157,20 +193,22 @@ public abstract class PurgingOperator {
 
     private void purgeColumnVersionAsync(
             TableToken tableName,
-            CharSequence columnName,
+            String columnName,
             int tableId,
             int tableTruncateVersion,
             int columnType,
             int partitionBy,
             long updateTxn,
-            LongList columnVersions
+            @Transient LongList columnVersions,
+            int columnVersionsLo,
+            int columnVersionsHi
     ) {
         Sequence pubSeq = messageBus.getColumnPurgePubSeq();
         while (true) {
             long cursor = pubSeq.next();
             if (cursor > -1L) {
                 ColumnPurgeTask task = messageBus.getColumnPurgeQueue().get(cursor);
-                task.of(tableName, columnName, tableId, tableTruncateVersion, columnType, partitionBy, updateTxn, columnVersions);
+                task.of(tableName, columnName, tableId, tableTruncateVersion, columnType, partitionBy, updateTxn, columnVersions, columnVersionsLo, columnVersionsHi);
                 pubSeq.done(cursor);
                 return;
             } else if (cursor == -1L) {
@@ -184,4 +222,5 @@ public abstract class PurgingOperator {
             Os.pause();
         }
     }
+
 }

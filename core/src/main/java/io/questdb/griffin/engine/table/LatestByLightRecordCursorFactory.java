@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -65,7 +65,7 @@ public class LatestByLightRecordCursorFactory extends AbstractRecordCursorFactor
         if (!orderedByTimestampAsc) {
             mapValueTypes.add(TIMESTAMP_VALUE_IDX, ColumnType.TIMESTAMP);
         }
-        Map latestByMap = MapFactory.createMap(configuration, columnTypes, mapValueTypes);
+        Map latestByMap = MapFactory.createOrderedMap(configuration, columnTypes, mapValueTypes);
         this.cursor = new LatestByLightRecordCursor(latestByMap);
         this.timestampIndex = timestampIndex;
         this.orderedByTimestampAsc = orderedByTimestampAsc;
@@ -99,6 +99,11 @@ public class LatestByLightRecordCursorFactory extends AbstractRecordCursorFactor
     @Override
     public boolean usesCompiledFilter() {
         return base.usesCompiledFilter();
+    }
+
+    @Override
+    public boolean usesIndex() {
+        return base.usesIndex();
     }
 
     @Override
@@ -193,7 +198,9 @@ public class LatestByLightRecordCursorFactory extends AbstractRecordCursorFactor
 
         @Override
         public void toTop() {
-            mapCursor.toTop();
+            if (mapCursor != null) {
+                mapCursor.toTop();
+            }
         }
 
         private void buildMap() {

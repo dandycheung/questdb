@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -31,8 +31,12 @@ import io.questdb.cairo.sql.ScalarFunction;
 import io.questdb.std.BinarySequence;
 import io.questdb.std.Long256;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
+import io.questdb.std.str.Utf8String;
 
 public abstract class BooleanFunction implements ScalarFunction {
+    protected static final Utf8String UTF_8_FALSE = new Utf8String("false");
+    protected static final Utf8String UTF_8_TRUE = new Utf8String("true");
 
     @Override
     public final BinarySequence getBin(Record rec) {
@@ -90,6 +94,11 @@ public abstract class BooleanFunction implements ScalarFunction {
     }
 
     @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public int getInt(Record rec) {
         return getBool(rec) ? 1 : 0;
     }
@@ -110,7 +119,7 @@ public abstract class BooleanFunction implements ScalarFunction {
     }
 
     @Override
-    public final void getLong256(Record rec, CharSink sink) {
+    public final void getLong256(Record rec, CharSink<?> sink) {
         throw new UnsupportedOperationException();
     }
 
@@ -135,13 +144,8 @@ public abstract class BooleanFunction implements ScalarFunction {
     }
 
     @Override
-    public final CharSequence getStr(Record rec) {
+    public final CharSequence getStrA(Record rec) {
         return getStr0(rec);
-    }
-
-    @Override
-    public final void getStr(Record rec, CharSink sink) {
-        sink.put(getStr0(rec));
     }
 
     @Override
@@ -174,7 +178,26 @@ public abstract class BooleanFunction implements ScalarFunction {
         return ColumnType.BOOLEAN;
     }
 
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        return getVarchar0(rec);
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        return getVarchar0(rec);
+    }
+
+    @Override
+    public final int getVarcharSize(Record rec) {
+        return getVarchar0(rec).size();
+    }
+
     protected String getStr0(Record rec) {
         return getBool(rec) ? "true" : "false";
+    }
+
+    protected Utf8Sequence getVarchar0(Record rec) {
+        return getBool(rec) ? UTF_8_TRUE : UTF_8_FALSE;
     }
 }

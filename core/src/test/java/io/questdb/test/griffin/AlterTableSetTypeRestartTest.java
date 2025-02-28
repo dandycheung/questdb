@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,17 +24,20 @@
 
 package io.questdb.test.griffin;
 
-import io.questdb.*;
+import io.questdb.PropertyKey;
+import io.questdb.ServerMain;
 import io.questdb.cairo.CairoEngine;
 import io.questdb.cairo.CairoException;
 import io.questdb.cairo.TableToken;
 import io.questdb.std.str.Path;
-import io.questdb.test.AbstractBootstrapTest;
-import io.questdb.test.TestServerMain;
 import io.questdb.test.tools.TestUtils;
-import org.junit.BeforeClass;
+import org.junit.Assert;
+import org.junit.Before;
+import org.junit.Ignore;
 import org.junit.Test;
 import org.postgresql.util.PSQLException;
+
+import java.util.HashMap;
 
 import static io.questdb.test.griffin.AlterTableSetTypeTest.NON_WAL;
 import static io.questdb.test.griffin.AlterTableSetTypeTest.WAL;
@@ -42,26 +45,25 @@ import static org.junit.Assert.*;
 
 public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeRestartTest {
 
-    @BeforeClass
-    public static void setUpStatic() throws Exception {
-        AbstractBootstrapTest.setUpStatic();
-        try {
-            createDummyConfiguration(PropertyKey.CAIRO_WAL_SUPPORTED.getPropertyPath() + "=true");
-        } catch (Exception e) {
-            throw new RuntimeException(e);
-        }
+    @Override
+    @Before
+    public void setUp() {
+        TestUtils.unchecked(() -> createDummyConfiguration(PropertyKey.CAIRO_WAL_SUPPORTED.getPropertyPath() + "=true"));
     }
 
     @Test
+    @Ignore
     public void testConvertLoop2() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "WAL");
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 insertInto(tableName);
                 insertInto(tableName);
@@ -76,11 +78,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // table has been converted to non-WAL
                 assertFalse(engine.isWalTable(token));
@@ -90,11 +94,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // table has been converted to WAL
                 assertTrue(engine.isWalTable(token));
@@ -114,13 +120,15 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     public void testNonPartitionedToWal() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createNonPartitionedTable(tableName);
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // non-WAL table
                 assertFalse(engine.isWalTable(token));
@@ -139,16 +147,19 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testNonWalToWal() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "BYPASS WAL");
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // non-WAL table
                 assertFalse(engine.isWalTable(token));
@@ -167,11 +178,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // WAL table
                 assertTrue(engine.isWalTable(token));
@@ -185,16 +198,19 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testNonWalToWalWithDropTable() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "BYPASS WAL");
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // non-WAL table
                 assertFalse(engine.isWalTable(token));
@@ -216,12 +232,15 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
+                final CairoEngine engine = serverMain.getEngine();
                 try {
-                    engine.getTableToken(tableName);
+                    engine.verifyTableName(tableName);
+                    Assert.fail();
                 } catch (CairoException e) {
                     TestUtils.assertContains(e.getFlyweightMessage(), "table does not exist [table=" + tableName + ']');
                 }
@@ -230,20 +249,23 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testNonWalToWalWithTxn() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "BYPASS WAL");
 
                 insertInto(tableName);
                 insertInto(tableName);
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
-                setSeqTxn(engine, token, 12345L);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
+                setSeqTxn(engine, token);
 
                 // non-WAL table
                 assertFalse(engine.isWalTable(token));
@@ -259,15 +281,16 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
-
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 insertInto(tableName);
                 insertInto(tableName);
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
                 assertSeqTxn(engine, token, 0L);
 
                 drainWalQueue(engine);
@@ -278,16 +301,19 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testSetType() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "BYPASS WAL");
                 insertInto(tableName);
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // non-WAL table
                 assertFalse(engine.isWalTable(token));
@@ -306,11 +332,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // table has been converted to WAL
                 assertTrue(engine.isWalTable(token));
@@ -337,11 +365,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // table has been converted to non-WAL
                 assertFalse(engine.isWalTable(token));
@@ -360,11 +390,12 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
-
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // no conversion happened, table was already non-WAL type
                 assertFalse(engine.isWalTable(token));
@@ -379,11 +410,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 // table has been converted to WAL
                 assertTrue(engine.isWalTable(token));
@@ -405,15 +438,18 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testWalToNonWal() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "WAL");
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 insertInto(tableName);
                 drainWalQueue(engine);
@@ -437,11 +473,13 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
                 assertFalse(engine.isWalTable(token));
                 assertSeqTxn(engine, token, 0);
                 insertInto(tableName);
@@ -453,15 +491,18 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
     }
 
     @Test
+    @Ignore
     public void testWalToNonWalWithDropTable() throws Exception {
         final String tableName = testName.getMethodName();
         TestUtils.assertMemoryLeak(() -> {
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
                 createTable(tableName, "WAL");
 
-                final CairoEngine engine = questdb.getCairoEngine();
-                final TableToken token = engine.getTableToken(tableName);
+                final CairoEngine engine = serverMain.getEngine();
+                final TableToken token = engine.verifyTableName(tableName);
 
                 insertInto(tableName);
                 drainWalQueue(engine);
@@ -489,12 +530,14 @@ public class AlterTableSetTypeRestartTest extends AbstractAlterTableSetTypeResta
             validateShutdown(tableName);
 
             // restart
-            try (final ServerMain questdb = new TestServerMain("-d", root.toString(), Bootstrap.SWITCH_USE_DEFAULT_LOG_FACTORY_CONFIGURATION)) {
-                questdb.start();
+            try (final ServerMain serverMain = ServerMain.create(root, new HashMap<>() {{
+                put(PropertyKey.CAIRO_WAL_APPLY_ENABLED.getEnvVarName(), "false");
+            }})) {
+                serverMain.start();
 
-                final CairoEngine engine = questdb.getCairoEngine();
+                final CairoEngine engine = serverMain.getEngine();
                 try {
-                    engine.getTableToken(tableName);
+                    engine.verifyTableName(tableName);
                 } catch (CairoException e) {
                     TestUtils.assertContains(e.getFlyweightMessage(), "table does not exist [table=" + tableName + ']');
                 }

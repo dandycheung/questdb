@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -30,7 +30,9 @@
 #include "sysutil.h"
 
 #include <stdlib.h>
+#include <stdint.h>
 #include <dirent.h>
+#include <string.h>
 #include <sys/errno.h>
 #include <sys/time.h>
 #include <sys/mount.h>
@@ -38,7 +40,6 @@
 
 JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_write
         (JNIEnv *e, jclass cl, jint fd, jlong address, jlong len, jlong offset) {
-
     off_t writeOffset = offset;
     ssize_t written;
 
@@ -137,6 +138,16 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_readNonNegativeInt
     return result;
 }
 
+JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_readIntAsUnsignedLong
+        (JNIEnv *e, jclass cl, jint fd, jlong offset) {
+    uint32_t result;
+    ssize_t readLen = pread((int) fd, (void *) &result, sizeof(jint), (off_t) offset);
+    if (readLen != sizeof(uint32_t)) {
+        return -1;
+    }
+    return (jlong) result;
+}
+
 JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_readNonNegativeLong
         (JNIEnv *e, jclass cl, jint fd, jlong offset) {
     jlong result;
@@ -187,6 +198,11 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_length0
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_hardLink
         (JNIEnv *e, jclass cl, jlong pcharSrc, jlong pcharHardLink) {
     return link((const char *) pcharSrc, (const char *) pcharHardLink);
+}
+
+JNIEXPORT jint JNICALL Java_io_questdb_std_Files_readLink0
+        (JNIEnv *e, jclass cl, jlong path, jlong buf, jint len) {
+    return (jint) readlink((const char *) path, (char *) buf, len);
 }
 
 JNIEXPORT jboolean JNICALL Java_io_questdb_std_Files_isSoftLink
@@ -276,8 +292,14 @@ JNIEXPORT jboolean JNICALL Java_io_questdb_std_Files_rmdir
 
 typedef struct {
     DIR *dir;
+    int type;
     struct dirent *entry;
 } FIND;
+
+void setFind(FIND *find, struct dirent *entry) {
+    find->entry = entry;
+    find->type = entry->d_type;
+}
 
 JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_findFirst
         (JNIEnv *e, jclass cl, jlong lpszName) {
@@ -307,7 +329,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_findFirst
 
     FIND *find = malloc(sizeof(FIND));
     find->dir = dir;
-    find->entry = entry;
+    setFind(find, entry);
     return (jlong) find;
 }
 
@@ -320,8 +342,9 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_findNext
         (JNIEnv *e, jclass cl, jlong findPtr) {
     FIND *find = (FIND *) findPtr;
     errno = 0;
-    find->entry = readdir(find->dir);
-    if (find->entry != NULL) {
+    struct dirent *entry = readdir(find->dir);
+    if (entry) {
+        setFind(find, entry);
         return 1;
     }
     return errno == 0 ? 0 : -1;
@@ -341,7 +364,7 @@ JNIEXPORT jlong JNICALL Java_io_questdb_std_Files_findName
 
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_findType
         (JNIEnv *e, jclass cl, jlong findPtr) {
-    return ((FIND *) findPtr)->entry->d_type;
+    return ((FIND *) findPtr)->type;
 }
 
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_lock
@@ -351,9 +374,7 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_lock
 
 JNIEXPORT jint JNICALL Java_io_questdb_std_Files_openCleanRW
         (JNIEnv *e, jclass cl, jlong lpszName, jlong size) {
-
     jint fd = open((const char *) lpszName, O_CREAT | O_RDWR, 0644);
-
     if (fd < 0) {
         // error opening / creating file
         return fd;
@@ -361,15 +382,26 @@ JNIEXPORT jint JNICALL Java_io_questdb_std_Files_openCleanRW
 
     jlong fileSize = Java_io_questdb_std_Files_length(e, cl, fd);
     if (fileSize > 0) {
-        if (flock((int) fd, LOCK_EX | LOCK_NB) == 0) {
+        ssize_t res;
+        RESTARTABLE(flock((int) fd, LOCK_EX | LOCK_NB), res);
+        if (res == 0) {
             // truncate file to 0 byte
             if (ftruncate(fd, 0) == 0) {
                 // allocate file to `size`
                 if (Java_io_questdb_std_Files_allocate(e, cl, fd, size) == JNI_TRUE) {
-                    // downgrade to shared lock
-                    if (flock((int) fd, LOCK_SH) == 0) {
-                        // success
-                        return fd;
+                    // Zero the file and msync, so that we have no unpleasant side effects like non-zero bytes read on ZFS.
+                    // See https://github.com/questdb/questdb/issues/4756
+                    void *addr = mmap(addr, (size_t) size, PROT_READ | PROT_WRITE, MAP_SHARED, (int) fd, 0);
+                    if (addr != MAP_FAILED) {
+                        memset(addr, 0, size);
+                        if (msync(addr, size, MS_SYNC) == 0) {
+                            munmap(addr, (size_t) size);
+                            // finally, downgrade to shared lock
+                            if (flock((int) fd, LOCK_SH) == 0) {
+                                // success
+                                return fd;
+                            }
+                        }
                     }
                 }
             }

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -25,14 +25,15 @@
 package io.questdb.test.cutlass.http;
 
 import io.questdb.Metrics;
-import io.questdb.cairo.*;
+import io.questdb.cairo.CairoEngine;
+import io.questdb.cairo.EntryUnavailableException;
+import io.questdb.cairo.TableWriter;
 import io.questdb.cutlass.http.HttpConnectionContext;
 import io.questdb.cutlass.http.processors.TextImportProcessor;
-import io.questdb.log.Log;
-import io.questdb.log.LogFactory;
 import io.questdb.network.NetworkFacadeImpl;
 import io.questdb.network.ServerDisconnectException;
 import io.questdb.std.Os;
+import io.questdb.test.AbstractTest;
 import io.questdb.test.tools.TestUtils;
 import org.jetbrains.annotations.NotNull;
 import org.junit.Assert;
@@ -52,9 +53,7 @@ import static io.questdb.test.tools.TestUtils.getSendDelayNetworkFacade;
 // They run the same test multiple times in order to test concurrent retry executions.
 // If a test becomes unstable (fails sometimes on build server or local run), increase number of iterations
 // to reproduce the failure.
-public class RetryIODispatcherTest {
-    private static final Log LOG = LogFactory.getLog(RetryIODispatcherTest.class);
-
+public class RetryIODispatcherTest extends AbstractTest {
     private static final String ValidImportRequest = "POST /upload HTTP/1.1\r\n" +
             "Host: localhost:9001\r\n" +
             "User-Agent: curl/7.64.0\r\n" +
@@ -123,11 +122,11 @@ public class RetryIODispatcherTest {
             "|   Rows handled  |                                                24  |                 |         |              |\r\n" +
             "|  Rows imported  |                                                24  |                 |         |              |\r\n" +
             "+-----------------------------------------------------------------------------------------------------------------+\r\n" +
-            "|              0  |                              Dispatching_base_num  |                   STRING  |           0  |\r\n" +
+            "|              0  |                              Dispatching_base_num  |                  VARCHAR  |           0  |\r\n" +
             "|              1  |                                   Pickup_DateTime  |                     DATE  |           0  |\r\n" +
-            "|              2  |                                  DropOff_datetime  |                   STRING  |           0  |\r\n" +
-            "|              3  |                                      PUlocationID  |                   STRING  |           0  |\r\n" +
-            "|              4  |                                      DOlocationID  |                   STRING  |           0  |\r\n" +
+            "|              2  |                                  DropOff_datetime  |                  VARCHAR  |           0  |\r\n" +
+            "|              3  |                                      PUlocationID  |                  VARCHAR  |           0  |\r\n" +
+            "|              4  |                                      DOlocationID  |                  VARCHAR  |           0  |\r\n" +
             "+-----------------------------------------------------------------------------------------------------------------+\r\n" +
             "\r\n" +
             "00\r\n" +
@@ -148,18 +147,19 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             testImportWaitsWhenWriterLocked(new HttpQueryTestBuilder()
-                            .withTempFolder(temp)
+                            .withTempFolder(root)
                             .withWorkerCount(2)
                             .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
-                            .withCustomTextImportProcessor(((configuration, engine, workerCount) -> new TextImportProcessor(engine) {
+                            .withCustomTextImportProcessor(((configuration, engine, workerCount) -> new TextImportProcessor(engine, configuration) {
                                 @Override
                                 public void onRequestRetry(HttpConnectionContext context) throws ServerDisconnectException {
                                     throw ServerDisconnectException.INSTANCE;
                                 }
                             })),
-                    0, ValidImportRequest, ValidImportResponse, false, true);
-            temp.delete();
-            temp.create();
+                    0, ValidImportRequest, ValidImportResponse, false, true
+            );
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -170,8 +170,8 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             assertImportProcessedWhenClientDisconnected();
-            temp.delete();
-            temp.create();
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -180,14 +180,14 @@ public class RetryIODispatcherTest {
         final int parallelCount = 4;
 
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(2)
                 .withHttpServerConfigBuilder(
                         new HttpServerConfigurationBuilder()
                                 .withNetwork(getSendDelayNetworkFacade(startDelay))
                                 .withRerunProcessingQueueSize(rerunProcessingQueueSize)
                 )
-                .run(engine -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table and do 1 import
                     new SendAndReceiveRequestBuilder().execute(ValidImportRequest, ValidImportResponse);
                     TableWriter writer = lockWriter(engine, "fhv_tripdata_2017-02.csv");
@@ -229,9 +229,10 @@ public class RetryIODispatcherTest {
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=select+count(*)+from+%22fhv_tripdata_2017-02.csv%22&count=true HTTP/1.1\r\n",
                             "93\r\n" +
-                                    "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + (parallelCount * insertCount + 1 - failedImports.get()) * validRequestRecordCount + "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + (parallelCount * insertCount + 1 - failedImports.get()) * validRequestRecordCount + "]],\"count\":1}\r\n" +
                                     "00\r\n" +
-                                    "\r\n");
+                                    "\r\n"
+                    );
                 });
     }
 
@@ -242,8 +243,8 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             testImportRerunsExceedsRerunProcessingQueueSize(1000);
-            temp.delete();
-            temp.create();
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -257,7 +258,7 @@ public class RetryIODispatcherTest {
     ) throws Exception {
         final int parallelCount = httpQueryTestBuilder.getWorkerCount();
         httpQueryTestBuilder
-                .run((engine) -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table and do 1 import
                     new SendAndReceiveRequestBuilder().execute(ValidImportRequest, ValidImportResponse);
 
@@ -320,9 +321,10 @@ public class RetryIODispatcherTest {
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=select+count(*)+from+%22fhv_tripdata_2017-02.csv%22&count=true HTTP/1.1\r\n",
                             (rowsExpected < 100 ? "92" : "93") + "\r\n" +
-                                    "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + rowsExpected + "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + rowsExpected + "]],\"count\":1}\r\n" +
                                     "00\r\n" +
-                                    "\r\n");
+                                    "\r\n"
+                    );
 
                 });
     }
@@ -334,16 +336,17 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             testImportWaitsWhenWriterLocked(new HttpQueryTestBuilder()
-                            .withTempFolder(temp)
+                            .withTempFolder(root)
                             .withWorkerCount(4)
                             .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder()
                                     .withNetwork(getSendDelayNetworkFacade(500))
                                     .withMultipartIdleSpinCount(10)
                             ),
                     500, ValidImportRequest, ValidImportResponse
-                    , true, false);
-            temp.delete();
-            temp.create();
+                    , true, false
+            );
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -354,25 +357,26 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             testImportWaitsWhenWriterLocked(new HttpQueryTestBuilder()
-                            .withTempFolder(temp)
+                            .withTempFolder(root)
                             .withWorkerCount(2)
                             .withHttpServerConfigBuilder(
                                     new HttpServerConfigurationBuilder().withNetwork(getSendDelayNetworkFacade(500))
                             ),
-                    0, ValidImportRequest, ValidImportResponse, true, true);
-            temp.delete();
-            temp.create();
+                    0, ValidImportRequest, ValidImportResponse, true, true
+            );
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
     @Test
     public void testImportsCreateAsSelectAndDrop() throws Exception {
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(4)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
                 .withTelemetry(false)
-                .run((engine) -> {
+                .run((engine, sqlExecutionContext) -> {
                     for (int i = 0; i < 10; i++) {
                         System.out.println("*************************************************************************************");
                         System.out.println("**************************         Run " + i + "            ********************************");
@@ -405,13 +409,14 @@ public class RetryIODispatcherTest {
     @Test
     public void testImportsHeaderIsNotFullyReceivedIntoReceiveBuffer() throws Exception {
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(1)
                 .withHttpServerConfigBuilder(
                         new HttpServerConfigurationBuilder()
                                 .withReceiveBufferSize(50)
-                ).run((engine) -> new SendAndReceiveRequestBuilder()
-                        .execute(ValidImportRequest,
+                ).run((engine, sqlExecutionContext) -> new SendAndReceiveRequestBuilder()
+                        .execute(
+                                ValidImportRequest,
                                 "HTTP/1.1 200 OK\r\n" +
                                         "Server: questDB/1.0\r\n" +
                                         "Date: Thu, 1 Jan 1970 00:00:00 GMT\r\n" +
@@ -421,7 +426,8 @@ public class RetryIODispatcherTest {
                                         "58\r\n" +
                                         "cannot parse import because of receive buffer is not big enough to parse table structure\r\n" +
                                         "00\r\n" +
-                                        "\r\n")
+                                        "\r\n"
+                        )
                 );
     }
 
@@ -432,15 +438,16 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             testImportWaitsWhenWriterLocked(new HttpQueryTestBuilder()
-                            .withTempFolder(temp)
+                            .withTempFolder(root)
                             .withWorkerCount(2)
                             .withHttpServerConfigBuilder(
                                     new HttpServerConfigurationBuilder()
                                             .withReceiveBufferSize(256)
                             ),
-                    200, ValidImportRequest, ValidImportResponse, false, true);
-            temp.delete();
-            temp.create();
+                    200, ValidImportRequest, ValidImportResponse, false, true
+            );
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -451,8 +458,8 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             assertInsertWaitsExceedsRerunProcessingQueueSize();
-            temp.delete();
-            temp.create();
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -463,8 +470,8 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             assertInsertWaitsWhenWriterLocked();
-            temp.delete();
-            temp.create();
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
         }
     }
 
@@ -475,8 +482,9 @@ public class RetryIODispatcherTest {
             System.out.println("**************************         Run " + i + "            ********************************");
             System.out.println("*************************************************************************************");
             assertInsertsIsPerformedWhenWriterLockedAndDisconnected();
-            temp.delete();
-            temp.create();
+            TestUtils.removeTestPath(root);
+            TestUtils.createTestPath(root);
+            Metrics.ENABLED.clear();
         }
     }
 
@@ -484,11 +492,11 @@ public class RetryIODispatcherTest {
     public void testRenameWaitsWhenWriterLocked() throws Exception {
         final int parallelCount = 2;
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(parallelCount)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
                 .withTelemetry(false)
-                .run(engine -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=%0A%0A%0Acreate+table+balances_x+(%0A%09cust_id+int%2C+%0A%09balance_ccy+symbol%2C+%0A%09balance+double%2C+%0A%09status+byte%2C+%0A%09timestamp+timestamp%0A)&limit=0%2C1000&count=true HTTP/1.1\r\n",
@@ -522,19 +530,21 @@ public class RetryIODispatcherTest {
                     Assert.assertFalse(finished);
 
                     writer.close();
-                    Assert.assertTrue("Table rename did not complete within timeout after writer is released",
-                            countDownLatch.await(5, TimeUnit.SECONDS));
+                    Assert.assertTrue(
+                            "Table rename did not complete within timeout after writer is released",
+                            countDownLatch.await(5, TimeUnit.SECONDS)
+                    );
                 });
     }
 
     private void assertImportProcessedWhenClientDisconnected() throws Exception {
         final int parallelCount = 2;
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(2)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
                 .withTelemetry(false)
-                .run((engine) -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table and do 1 import
                     new SendAndReceiveRequestBuilder().execute(ValidImportRequest, ValidImportResponse);
 
@@ -543,7 +553,7 @@ public class RetryIODispatcherTest {
                     final int validRequestRecordCount = 24;
                     final int insertCount = 1;
                     CountDownLatch countDownLatch = new CountDownLatch(parallelCount);
-                    int[] fds = new int[parallelCount * insertCount];
+                    long[] fds = new long[parallelCount * insertCount];
                     Arrays.fill(fds, -1);
                     for (int i = 0; i < parallelCount; i++) {
                         final int threadI = i;
@@ -552,7 +562,7 @@ public class RetryIODispatcherTest {
                                 for (int r = 0; r < insertCount; r++) {
                                     // insert one record
                                     try {
-                                        int fd = new SendAndReceiveRequestBuilder().connectAndSendRequest(ValidImportRequest);
+                                        long fd = new SendAndReceiveRequestBuilder().connectAndSendRequest(ValidImportRequest);
                                         fds[threadI * insertCount + r] = fd;
                                     } catch (Exception e) {
                                         LOG.error().$("Failed execute insert http request. Server error ").$(e).$();
@@ -567,8 +577,8 @@ public class RetryIODispatcherTest {
                     countDownLatch.await();
                     assertNRowsInserted(validRequestRecordCount);
 
-                    for (int fd : fds) {
-                        Assert.assertNotEquals(fd, -1);
+                    for (long fd : fds) {
+                        Assert.assertNotEquals(-1, fd);
                         NetworkFacadeImpl.INSTANCE.close(fd);
                     }
 
@@ -596,11 +606,11 @@ public class RetryIODispatcherTest {
         final int rerunProcessingQueueSize = 1;
         final int parallelCount = 4;
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(parallelCount)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder().withRerunProcessingQueueSize(rerunProcessingQueueSize))
                 .withTelemetry(false)
-                .run(engine -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=%0A%0A%0Acreate+table+balances_x+(%0A%09cust_id+int%2C+%0A%09balance_ccy+symbol%2C+%0A%09balance+double%2C+%0A%09status+byte%2C+%0A%09timestamp+timestamp%0A)&limit=0%2C1000&count=true HTTP/1.1\r\n",
@@ -623,7 +633,7 @@ public class RetryIODispatcherTest {
                                                 .withClientLinger(60)
                                                 .executeWithStandardHeaders(
                                                         "GET /query?query=%0A%0Ainsert+into+balances_x+(cust_id%2C+balance_ccy%2C+balance%2C+timestamp)+values+(1%2C+%27USD%27%2C+1500.00%2C+6000000001)&limit=0%2C1000&count=true HTTP/1.1\r\n",
-                                                        IODispatcherTest.JSON_DDL_RESPONSE
+                                                        IODispatcherTest.INSERT_QUERY_RESPONSE
                                                 );
                                     } catch (AssertionError ase) {
                                         fails.incrementAndGet();
@@ -650,7 +660,7 @@ public class RetryIODispatcherTest {
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=select+count(*)+from+balances_x&count=true HTTP/1.1\r\n",
                             "80\r\n" +
-                                    "{\"query\":\"select count(*) from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + (parallelCount * insertCount - fails.get()) + "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"select count(*) from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + (parallelCount * insertCount - fails.get()) + "]],\"count\":1}\r\n" +
                                     "00\r\n" +
                                     "\r\n"
                     );
@@ -660,11 +670,11 @@ public class RetryIODispatcherTest {
     private void assertInsertWaitsWhenWriterLocked() throws Exception {
         final int parallelCount = 2;
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(parallelCount)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
                 .withTelemetry(false)
-                .run(engine -> {
+                .run((engine, sqlExecutionContext) -> {
                     // create table
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=%0A%0A%0Acreate+table+balances_x+(%0A%09cust_id+int%2C+%0A%09balance_ccy+symbol%2C+%0A%09balance+double%2C+%0A%09status+byte%2C+%0A%09timestamp+timestamp%0A)&limit=0%2C1000&count=true HTTP/1.1\r\n",
@@ -686,7 +696,7 @@ public class RetryIODispatcherTest {
                                                 .withClientLinger(60)
                                                 .executeWithStandardHeaders(
                                                         "GET /query?query=%0A%0Ainsert+into+balances_x+(cust_id%2C+balance_ccy%2C+balance%2C+timestamp)+values+(1%2C+%27USD%27%2C+1500.00%2C+6000000001)&limit=0%2C1000&count=true HTTP/1.1\r\n",
-                                                        IODispatcherTest.JSON_DDL_RESPONSE
+                                                        IODispatcherTest.INSERT_QUERY_RESPONSE
                                                 );
                                     } catch (Exception e) {
                                         LOG.error().$("Failed execute insert http request. Server error ").$(e).$();
@@ -712,7 +722,7 @@ public class RetryIODispatcherTest {
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=select+count(*)+from+balances_x&count=true HTTP/1.1\r\n",
                             "80\r\n" +
-                                    "{\"query\":\"select count(*) from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + parallelCount * insertCount + "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"select count(*) from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + parallelCount * insertCount + "]],\"count\":1}\r\n" +
                                     "00\r\n" +
                                     "\r\n"
                     );
@@ -721,14 +731,12 @@ public class RetryIODispatcherTest {
 
     private void assertInsertsIsPerformedWhenWriterLockedAndDisconnected() throws Exception {
         final int parallelCount = 4;
-        final Metrics metrics = Metrics.enabled();
         new HttpQueryTestBuilder()
-                .withTempFolder(temp)
+                .withTempFolder(root)
                 .withWorkerCount(parallelCount)
                 .withHttpServerConfigBuilder(new HttpServerConfigurationBuilder())
-                .withMetrics(metrics)
                 .withTelemetry(false)
-                .run(engine -> {
+                .run((engine, sqlExecutionContext) -> {
                     long nonInsertQueries = 0;
 
                     // create table
@@ -740,7 +748,7 @@ public class RetryIODispatcherTest {
 
                     TableWriter writer = lockWriter(engine, "balances_x");
                     CountDownLatch countDownLatch = new CountDownLatch(parallelCount);
-                    int[] fds = new int[parallelCount];
+                    long[] fds = new long[parallelCount];
                     Arrays.fill(fds, -1);
                     Thread[] threads = new Thread[parallelCount];
                     for (int i = 0; i < parallelCount; i++) {
@@ -753,7 +761,7 @@ public class RetryIODispatcherTest {
                                     Os.sleep(threadI * 5);
                                     String request = "GET /query?query=%0A%0Ainsert+into+balances_x+(cust_id%2C+balance_ccy%2C+balance%2C+timestamp)+values+(" + threadI +
                                             "%2C+%27USD%27%2C+1500.00%2C+6000000001)&limit=0%2C1000&count=true HTTP/1.1\r\n" + SendAndReceiveRequestBuilder.RequestHeaders;
-                                    int fd = new SendAndReceiveRequestBuilder()
+                                    long fd = new SendAndReceiveRequestBuilder()
                                             .withClientLinger(60)
                                             .connectAndSendRequest(request);
                                     fds[threadI] = fd;
@@ -772,29 +780,33 @@ public class RetryIODispatcherTest {
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=SELECT+1 HTTP/1.1\r\n",
                             "63\r\n" +
-                                    "{\"query\":\"SELECT 1\",\"columns\":[{\"name\":\"1\",\"type\":\"INT\"}],\"dataset\":[[1]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"SELECT 1\",\"columns\":[{\"name\":\"1\",\"type\":\"INT\"}],\"timestamp\":-1,\"dataset\":[[1]],\"count\":1}\r\n" +
                                     "00\r\n" +
-                                    "\r\n");
+                                    "\r\n"
+                    );
                     nonInsertQueries++;
 
                     final int maxWaitTimeMillis = 3000;
                     final int sleepMillis = 10;
 
+                    final Metrics metrics = engine.getMetrics();
                     // wait for all insert queries to be initially handled
                     long startedInserts;
                     for (int i = 0; i < maxWaitTimeMillis / sleepMillis; i++) {
-                        startedInserts = metrics.jsonQuery().startedQueriesCount() - nonInsertQueries;
+                        startedInserts = metrics.jsonQueryMetrics().startedQueriesCount() - nonInsertQueries;
                         if (startedInserts >= parallelCount) {
                             break;
                         }
                         Os.sleep(sleepMillis);
                     }
-                    startedInserts = metrics.jsonQuery().startedQueriesCount() - nonInsertQueries;
-                    Assert.assertTrue("expected at least " + parallelCount + "insert attempts, but got: " + startedInserts,
-                            startedInserts >= parallelCount);
+                    startedInserts = metrics.jsonQueryMetrics().startedQueriesCount() - nonInsertQueries;
+                    Assert.assertTrue(
+                            "expected at least " + parallelCount + "insert attempts, but got: " + startedInserts,
+                            startedInserts >= parallelCount
+                    );
 
                     for (int n = 0; n < fds.length; n++) {
-                        Assert.assertNotEquals(fds[n], -1);
+                        Assert.assertNotEquals(-1, fds[n]);
                         NetworkFacadeImpl.INSTANCE.close(fds[n]);
                     }
 
@@ -803,20 +815,20 @@ public class RetryIODispatcherTest {
                     // wait for all insert queries to be executed
                     long completeInserts;
                     for (int i = 0; i < maxWaitTimeMillis / sleepMillis; i++) {
-                        completeInserts = metrics.jsonQuery().completedQueriesCount() - nonInsertQueries;
+                        completeInserts = metrics.jsonQueryMetrics().completedQueriesCount() - nonInsertQueries;
                         if (completeInserts == parallelCount) {
                             break;
                         }
                         Os.sleep(sleepMillis);
                     }
-                    completeInserts = metrics.jsonQuery().completedQueriesCount() - nonInsertQueries;
+                    completeInserts = metrics.jsonQueryMetrics().completedQueriesCount() - nonInsertQueries;
                     Assert.assertEquals("expected all inserts to succeed", parallelCount, completeInserts);
 
                     // check that we have all the records inserted
                     new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                             "GET /query?query=select+count()+from+balances_x&count=true HTTP/1.1\r\n",
                             "7e\r\n" +
-                                    "{\"query\":\"select count() from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + parallelCount + "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                                    "{\"query\":\"select count() from balances_x\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + parallelCount + "]],\"count\":1}\r\n" +
                                     "00\r\n" +
                                     "\r\n"
                     );
@@ -841,13 +853,14 @@ public class RetryIODispatcherTest {
         return writer;
     }
 
-    protected void assertNRowsInserted(final int nRows) throws InterruptedException {
+    protected void assertNRowsInserted(final int nRows) {
         new SendAndReceiveRequestBuilder().executeWithStandardHeaders(
                 "GET /query?query=select+count(*)+from+%22fhv_tripdata_2017-02.csv%22&count=true HTTP/1.1\r\n",
                 "92\r\n" +
-                        "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"dataset\":[[" + nRows +
-                        "]],\"timestamp\":-1,\"count\":1}\r\n" +
+                        "{\"query\":\"select count(*) from \\\"fhv_tripdata_2017-02.csv\\\"\",\"columns\":[{\"name\":\"count\",\"type\":\"LONG\"}],\"timestamp\":-1,\"dataset\":[[" + nRows +
+                        "]],\"count\":1}\r\n" +
                         "00\r\n" +
-                        "\r\n");
+                        "\r\n"
+        );
     }
 }

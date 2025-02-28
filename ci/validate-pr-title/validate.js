@@ -8,7 +8,6 @@ const allowedTypes = [
   "perf",
   "test",
   "ci",
-  "chore",
   "revert",
 ];
 
@@ -24,6 +23,7 @@ const allowedSubTypes = [
   "conf",
   "ui",
   "wal",
+  "parquet",
 ];
 
 const errorMessage = `

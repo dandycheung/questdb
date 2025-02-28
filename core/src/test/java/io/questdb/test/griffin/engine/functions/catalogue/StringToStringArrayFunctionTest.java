@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -79,6 +79,22 @@ public class StringToStringArrayFunctionTest {
     }
 
     @Test
+    public void testGetStrEmpty() throws SqlException {
+        StringToStringArrayFunction function = new StringToStringArrayFunction(42, "{}");
+        TestUtils.assertEquals("{}", function.getStrA(null));
+        TestUtils.assertEquals("{}", function.getStrB(null));
+        Assert.assertEquals(2, function.getStrLen(null));
+    }
+
+    @Test
+    public void testGetStrSimple() throws SqlException {
+        StringToStringArrayFunction function = new StringToStringArrayFunction(42, "{ab, 3,true,1.26,test 1}");
+        TestUtils.assertEquals("{ab,3,true,1.26,test 1}", function.getStrA(null));
+        TestUtils.assertEquals("{ab,3,true,1.26,test 1}", function.getStrB(null));
+        Assert.assertEquals(23, function.getStrLen(null));
+    }
+
+    @Test
     public void testNestedArray() {
         assertFailure("{{}}", "unexpected '{' character");
     }
@@ -140,7 +156,7 @@ public class StringToStringArrayFunctionTest {
         StringToStringArrayFunction function = new StringToStringArrayFunction(5, expression);
         Assert.assertEquals(expected.length, function.getArrayLength());
         for (int i = 0, n = expected.length; i < n; i++) {
-            Assert.assertEquals(expected[i], function.getStr(null, i));
+            Assert.assertEquals(expected[i], function.getStrA(null, i));
         }
     }
 

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -37,6 +37,7 @@ import io.questdb.std.IntList;
 import io.questdb.std.ObjList;
 
 public class EqStrFunctionFactory implements FunctionFactory {
+
     @Override
     public String getSignature() {
         return "=(SS)";
@@ -48,14 +49,20 @@ public class EqStrFunctionFactory implements FunctionFactory {
     }
 
     @Override
-    public Function newInstance(int position, ObjList<Function> args, IntList argPositions, CairoConfiguration configuration, SqlExecutionContext sqlExecutionContext) {
+    public Function newInstance(
+            int position,
+            ObjList<Function> args,
+            IntList argPositions,
+            CairoConfiguration configuration,
+            SqlExecutionContext sqlExecutionContext
+    ) {
         // there are optimisation opportunities
         // 1. when one of args is constant null comparison can boil down to checking
         //    length of non-constant (must be -1)
         // 2. when one of arguments is constant, save method call and use a field
 
-        Function a = args.getQuick(0);
-        Function b = args.getQuick(1);
+        final Function a = args.getQuick(0);
+        final Function b = args.getQuick(1);
 
         if (a.isConstant() && !b.isConstant()) {
             return createHalfConstantFunc(a, b);
@@ -69,16 +76,14 @@ public class EqStrFunctionFactory implements FunctionFactory {
     }
 
     private Function createHalfConstantFunc(Function constFunc, Function varFunc) {
-        CharSequence constValue = constFunc.getStr(null);
-
+        CharSequence constValue = constFunc.getStrA(null);
         if (constValue == null) {
             return new NullCheckFunc(varFunc);
         }
-
         return new ConstCheckFunc(varFunc, constValue);
     }
 
-    private static class ConstCheckFunc extends NegatableBooleanFunction implements UnaryFunction {
+    public static class ConstCheckFunc extends NegatableBooleanFunction implements UnaryFunction {
         private final Function arg;
         private final CharSequence constant;
 
@@ -94,7 +99,7 @@ public class EqStrFunctionFactory implements FunctionFactory {
 
         @Override
         public boolean getBool(Record rec) {
-            return negated != Chars.equalsNc(constant, arg.getStr(rec));
+            return negated != Chars.equalsNc(constant, arg.getStrA(rec));
         }
 
         @Override
@@ -117,7 +122,7 @@ public class EqStrFunctionFactory implements FunctionFactory {
             // important to compare A and B strings in case
             // these are columns of the same record
             // records have re-usable character sequences
-            final CharSequence a = left.getStr(rec);
+            final CharSequence a = left.getStrA(rec);
             final CharSequence b = right.getStrB(rec);
 
             if (a == null) {
@@ -134,7 +139,6 @@ public class EqStrFunctionFactory implements FunctionFactory {
             } else {
                 return "=";
             }
-
         }
     }
 
@@ -159,7 +163,7 @@ public class EqStrFunctionFactory implements FunctionFactory {
         public void toPlan(PlanSink sink) {
             sink.val(arg);
             if (negated) {
-                sink.val(" is not null ");
+                sink.val(" is not null");
             } else {
                 sink.val(" is null");
             }

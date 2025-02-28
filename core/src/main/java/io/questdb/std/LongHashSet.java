@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -24,10 +24,14 @@
 
 package io.questdb.std;
 
+import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Sinkable;
+import org.jetbrains.annotations.NotNull;
+
 import java.util.Arrays;
 
 
-public class LongHashSet extends AbstractLongHashSet {
+public class LongHashSet extends AbstractLongHashSet implements Sinkable {
 
     private static final int MIN_INITIAL_CAPACITY = 16;
     private final LongList list;
@@ -49,7 +53,7 @@ public class LongHashSet extends AbstractLongHashSet {
     /**
      * Adds key to hash set preserving key uniqueness.
      *
-     * @param key immutable sequence of characters.
+     * @param key key to be added.
      * @return false if key is already in the set and true otherwise.
      */
     public boolean add(long key) {
@@ -97,10 +101,6 @@ public class LongHashSet extends AbstractLongHashSet {
         return true;
     }
 
-    public boolean excludes(long key) {
-        return keyIndex(key) > -1;
-    }
-
     public long get(int index) {
         return list.getQuick(index);
     }
@@ -114,7 +114,7 @@ public class LongHashSet extends AbstractLongHashSet {
         int hashCode = 0;
         for (int i = 0, n = keys.length; i < n; i++) {
             if (keys[i] != noEntryKeyValue) {
-                hashCode += keys[i];
+                hashCode += (int) keys[i];
             }
         }
         return hashCode;
@@ -126,6 +126,11 @@ public class LongHashSet extends AbstractLongHashSet {
             super.removeAt(index);
             list.remove(key);
         }
+    }
+
+    @Override
+    public void toSink(@NotNull CharSink<?> sink) {
+        list.toSink(sink);
     }
 
     @Override

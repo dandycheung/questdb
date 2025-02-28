@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -26,7 +26,7 @@ package io.questdb.std;
 
 import io.questdb.griffin.SqlException;
 import io.questdb.std.str.AbstractCharSequence;
-import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf16Sink;
 import org.jetbrains.annotations.NotNull;
 import org.jetbrains.annotations.Nullable;
 
@@ -111,6 +111,13 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
         return immutableOf(value);
     }
 
+    public static CharSequence unquoteIfNoDots(CharSequence value) {
+        if (Chars.isQuoted(value) && Chars.indexOf(value, '.') == -1) {
+            return value.subSequence(1, value.length() - 1);
+        }
+        return immutableOf(value);
+    }
+
     public void backTo(int position, CharSequence lastSeen) {
         if (position < 0 || position > _len) {
             throw new IndexOutOfBoundsException();
@@ -161,7 +168,7 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
     }
 
     public boolean hasUnparsed() {
-        return unparsed.size() > 0;
+        return !unparsed.isEmpty();
     }
 
     public CharSequence immutableBetween(int lo, int hi) {
@@ -190,9 +197,7 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
 
     @Override
     public CharSequence next() {
-
-        if (unparsed.size() > 0) {
-
+        if (!unparsed.isEmpty()) {
             this._lo = unparsedPosition.pollLast();
             this._pos = unparsedPosition.pollLast();
 
@@ -295,8 +300,8 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
         return last = flyweightSequence;
     }
 
-    public void of(CharSequence cs) {
-        of(cs, 0, cs == null ? 0 : cs.length());
+    public void of(CharSequence content) {
+        of(content, 0, content == null ? 0 : content.length());
     }
 
     public void of(CharSequence cs, int lo, int hi) {
@@ -330,7 +335,7 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
 
     public void stash() {
         int count = 0;
-        while (unparsed.size() > 0) {
+        while (!unparsed.isEmpty()) {
             parkedUnparsed.push(unparsed.pop());
             parkedPosition.push(unparsedPosition.pop());
             parkedPosition.push(unparsedPosition.pop());
@@ -446,7 +451,7 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
         @NotNull
         @Override
         public String toString() {
-            final CharSink b = Misc.getThreadLocalBuilder();
+            final Utf16Sink b = Misc.getThreadLocalSink();
             b.put(cs0);
             if (sep != NO_SEPARATOR) {
                 b.put(sep);
@@ -463,7 +468,7 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
         }
     }
 
-    public class FloatingSequence extends AbstractCharSequence implements Mutable {
+    public class FloatingSequence extends AbstractCharSequence implements Mutable, BufferWindowCharSequence {
         int hi;
         int lo;
 
@@ -495,6 +500,13 @@ public class GenericLexer implements ImmutableIterator<CharSequence> {
 
         public void setLo(int lo) {
             this.lo = lo;
+        }
+
+        @Override
+        public void shiftLo(int positiveOffset) {
+            assert positiveOffset > -1;
+            this.lo += positiveOffset;
+            assert lo < hi;
         }
 
         @Override

@@ -6,7 +6,7 @@
  *    \__\_\\__,_|\___||___/\__|____/|____/
  *
  *  Copyright (c) 2014-2019 Appsicle
- *  Copyright (c) 2019-2023 QuestDB
+ *  Copyright (c) 2019-2024 QuestDB
  *
  *  Licensed under the Apache License, Version 2.0 (the "License");
  *  you may not use this file except in compliance with the License.
@@ -32,6 +32,7 @@ import io.questdb.std.BinarySequence;
 import io.questdb.std.Long256;
 import io.questdb.std.Numbers;
 import io.questdb.std.str.CharSink;
+import io.questdb.std.str.Utf8Sequence;
 
 public abstract class LongFunction implements ScalarFunction {
 
@@ -68,13 +69,12 @@ public abstract class LongFunction implements ScalarFunction {
     @Override
     public double getDouble(Record rec) {
         final long val = getLong(rec);
-        return val != Numbers.LONG_NaN ? val : Double.NaN;
+        return val != Numbers.LONG_NULL ? val : Double.NaN;
     }
 
     @Override
     public float getFloat(Record rec) {
-        final long val = getLong(rec);
-        return val != Numbers.LONG_NaN ? val : Float.NaN;
+        return Numbers.longToFloat(getLong(rec));
     }
 
     @Override
@@ -98,6 +98,11 @@ public abstract class LongFunction implements ScalarFunction {
     }
 
     @Override
+    public final int getIPv4(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
     public final int getInt(Record rec) {
         throw new UnsupportedOperationException();
     }
@@ -113,7 +118,7 @@ public abstract class LongFunction implements ScalarFunction {
     }
 
     @Override
-    public final void getLong256(Record rec, CharSink sink) {
+    public final void getLong256(Record rec, CharSink<?> sink) {
         throw new UnsupportedOperationException();
     }
 
@@ -138,12 +143,7 @@ public abstract class LongFunction implements ScalarFunction {
     }
 
     @Override
-    public final CharSequence getStr(Record rec) {
-        throw new UnsupportedOperationException();
-    }
-
-    @Override
-    public final void getStr(Record rec, CharSink sink) {
+    public final CharSequence getStrA(Record rec) {
         throw new UnsupportedOperationException();
     }
 
@@ -175,5 +175,20 @@ public abstract class LongFunction implements ScalarFunction {
     @Override
     public final int getType() {
         return ColumnType.LONG;
+    }
+
+    @Override
+    public Utf8Sequence getVarcharA(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public Utf8Sequence getVarcharB(Record rec) {
+        throw new UnsupportedOperationException();
+    }
+
+    @Override
+    public final int getVarcharSize(Record rec) {
+        throw new UnsupportedOperationException();
     }
 }
